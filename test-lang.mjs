@@ -39,3 +39,17 @@ assert.ok(keep('Унесенные призраками / Sen to Chihiro no Kami
 assert.ok(keep('Гамильтон без года', ham) && keep('Anything 1998', null)); // no year / unknown years -> keep
 assert.equal(allowedYears([], 2025), null);
 console.log('movie match ok');
+
+// Season detection from release titles.
+const sa = src.indexOf('  const SeasonDetect'), sb = src.indexOf('  // ───────────────────────────── Search helpers');
+const SeasonDetect = new Function(src.slice(sa, sb) + '; return SeasonDetect;')();
+for (const [t, want] of [
+  ['Темная материя (2 сезон: 1-6 серии из 10) / Dark Matter / 2026', ['S02']],
+  ['Темная материя / Dark Matter / Сезон: 1 / Серии: 1-9 из 9', ['S01']],
+  ['Темная материя / Dark Matter [02х01-05 из 10] (2026)', ['S02']],
+  ['Аватар (1-3 сезоны: 1-27 выпуски из 27)', ['S01', 'S02', 'S03']],
+  ['Dark.Matter.2024.S02E01.ITA.ENG.2160p', ['S02']],
+  ['Гамильтон /Hamilton /s01e01-09 /HD1080p', ['S01']],
+  ['Hamilton.2020.2160p.WEB', []],
+]) assert.deepEqual(SeasonDetect(t), want, t);
+console.log('season ok');

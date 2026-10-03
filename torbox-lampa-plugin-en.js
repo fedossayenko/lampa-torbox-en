@@ -1027,7 +1027,7 @@ try {
     }
 
     // English source: Torrentio (CORS *, keyed by IMDb id). Merged with the RU parsers.
-    // ponytail: series queries S<season|1>E1 only (season packs + that episode); per-episode lookup if needed.
+    // ponytail: series ask SxxE01 for each of the last 5 seasons (season packs + first episodes); per-episode lookup if needed.
     async function searchTorrentio(movie, signal) {
       const isTv = !!(movie.name || movie.first_air_date || movie.number_of_seasons);
       let imdb = movie.imdb_id;
@@ -1039,16 +1039,24 @@ try {
         } catch (_) {}
       }
       if (!imdb) return new Map();
-      const path = isTv ? `series/${imdb}:${movie.season_number || movie.season || 1}:1` : `movie/${imdb}`;
+      const lastSeason = Number(movie.number_of_seasons) || Number(movie.season_number || movie.season) || 1;
+      const paths = isTv
+        ? Array.from({ length: Math.min(lastSeason, 5) }, (_, i) => `series/${imdb}:${lastSeason - i}:1`)
+        : [`movie/${imdb}`];
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 8000);
       const onAbort = () => ctrl.abort();
       signal?.addEventListener('abort', onAbort, { once: true });
       try {
-        const res = await fetch(`https://torrentio.strem.fun/stream/${path}.json`, { signal: ctrl.signal });
-        const json = await res.json();
+        const lists = await Promise.all(
+          paths.map((path) =>
+            fetch(`https://torrentio.strem.fun/stream/${path}.json`, { signal: ctrl.signal })
+              .then((r) => r.json())
+              .then((j) => j?.streams || [], () => [])
+          )
+        );
         const map = new Map();
-        (json?.streams || []).forEach((st) => {
+        lists.flat().forEach((st) => {
           const hash = String(st.infoHash || '').toLowerCase();
           if (!Utils.isHex40(hash) || map.has(hash)) return;
           const lines = String(st.title || '').split('\n');
@@ -1216,6 +1224,31 @@ try {
     };
     return { keep, allowedYears };
   })();
+
+  // ───────────────────────────── Season detection (-en fork) ─────────────────────────────
+  // "2 сезон", "Сезон: 2", "1-3 сезоны", "S02", "S01-S03", "S02E05", "[02x01-05", "Season 2" -> ['S02', ...]
+  const SeasonDetect = (title) => {
+    const t = String(title || '');
+    const out = new Set();
+    const add = (a, b = a) => {
+      a = Number(a); b = Number(b);
+      if (a > 0 && b >= a && b - a < 40) for (let i = a; i <= b; i++) out.add('S' + String(i).padStart(2, '0'));
+    };
+    const RES = [
+      /(\d{1,2})\s*-\s*(\d{1,2})\s*сезон/gi,
+      /(?<![\d\s])\s*сезон[ыи]?\s*:\s*(\d{1,2})(?:\s*-\s*(\d{1,2}))?/gi,
+      /(?<!-\s?)(?<!\d)(\d{1,2})\s*сезон/gi,
+      /\bs(\d{1,2})\s*-\s*s(\d{1,2})\b/gi,
+      /\bs(\d{1,2})(?=e\d|\b)/gi,
+      /\[(\d{1,2})[xх]\d/gi,
+      /season\s*(\d{1,2})(?:\s*-\s*(\d{1,2}))?/gi,
+    ];
+    RES.forEach((re) => {
+      let m;
+      while ((m = re.exec(t))) add(m[1], m[2] || m[1]);
+    });
+    return Array.from(out).sort();
+  };
 
   // ───────────────────────────── Search helpers ─────────────────────────────
   function generateSearchCombinations(movie = {}) {
@@ -1387,11 +1420,12 @@ try {
       lang: 'RU/UK',
       video_codec: 'all',
       audio_codec: 'all',
+      season: 'all',
     };
 
     const loadFilters = () => {
       try {
-        return JSON.parse(Store.get('torbox_filters_v4', JSON.stringify(defaultFilters)));
+        return { ...defaultFilters, ...JSON.parse(Store.get('torbox_filters_v4', JSON.stringify(defaultFilters))) };
       } catch {
         Store.set('torbox_filters_v4', JSON.stringify(defaultFilters));
         return { ...defaultFilters };
@@ -2032,6 +2066,7 @@ try {
         voices: Array.isArray(raw?.info?.voices) ? raw.info.voices : [],
         video_codec: tech.video_codec,
         audio_langs: tech.audio_langs,
+        seasons: SeasonDetect(raw?.Title),
         audio_codecs: tech.audio_codecs,
         info_formated:
           `[${Utils.getQualityLabel(raw?.Title || '', raw)}] ${Utils.formatBytes(raw?.Size)} ` +
@@ -2949,6 +2984,7 @@ try {
         (t) => state.filters.video_type === 'all' || t.video_type === state.filters.video_type,
         (t) => state.filters.translation === 'all' || (Array.isArray(t.voices) && t.voices.includes(state.filters.translation)),
         (t) => LangDetect.matches(t.audio_langs, state.filters.lang),
+        (t) => !state.filters.season || state.filters.season === 'all' || (t.seasons || []).includes(state.filters.season),
         (t) => state.filters.video_codec === 'all' || (t.video_codec && t.video_codec.toUpperCase() === state.filters.video_codec.toUpperCase()),
         (t) => state.filters.audio_codec === 'all' || (Array.isArray(t.audio_codecs) && t.audio_codecs.includes(state.filters.audio_codec.toUpperCase())),
         (t) => state.filters.tracker === 'all' || (Array.isArray(t.trackers) && t.trackers.includes(state.filters.tracker)),
@@ -3143,6 +3179,11 @@ try {
 
       const baseItems = [
         { title: translate('torbox_filter_refine'), refine: true },
+        ...(state.all_torrents.some((t) => t.seasons && t.seasons.length)
+          ? [Object.assign(buildOne('season', 'torbox_filter_quality', state.all_torrents.map((t) => t.seasons || [])), {
+              title: Lampa.Storage.get('language', 'ru') === 'en' ? 'Season' : 'Сезон',
+            })]
+          : []),
         buildOne('quality', 'torbox_filter_quality', state.all_torrents.map((t) => t.quality)),
         buildOne('video_type', 'torbox_filter_video_type', state.all_torrents.map((t) => t.video_type)),
         buildOne('translation', 'torbox_filter_translation', state.all_torrents.map((t) => t.voices || [])),

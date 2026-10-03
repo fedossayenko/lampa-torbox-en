@@ -65,3 +65,28 @@
     return { keep, allowedYears };
   })();
 
+  // ───────────────────────────── Season detection (-en fork) ─────────────────────────────
+  // "2 сезон", "Сезон: 2", "1-3 сезоны", "S02", "S01-S03", "S02E05", "[02x01-05", "Season 2" -> ['S02', ...]
+  const SeasonDetect = (title) => {
+    const t = String(title || '');
+    const out = new Set();
+    const add = (a, b = a) => {
+      a = Number(a); b = Number(b);
+      if (a > 0 && b >= a && b - a < 40) for (let i = a; i <= b; i++) out.add('S' + String(i).padStart(2, '0'));
+    };
+    const RES = [
+      /(\d{1,2})\s*-\s*(\d{1,2})\s*сезон/gi,
+      /(?<![\d\s])\s*сезон[ыи]?\s*:\s*(\d{1,2})(?:\s*-\s*(\d{1,2}))?/gi,
+      /(?<!-\s?)(?<!\d)(\d{1,2})\s*сезон/gi,
+      /\bs(\d{1,2})\s*-\s*s(\d{1,2})\b/gi,
+      /\bs(\d{1,2})(?=e\d|\b)/gi,
+      /\[(\d{1,2})[xх]\d/gi,
+      /season\s*(\d{1,2})(?:\s*-\s*(\d{1,2}))?/gi,
+    ];
+    RES.forEach((re) => {
+      let m;
+      while ((m = re.exec(t))) add(m[1], m[2] || m[1]);
+    });
+    return Array.from(out).sort();
+  };
+

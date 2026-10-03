@@ -28,11 +28,27 @@ EDITS = [
      "          one.items.splice(1, 0, { title: 'RU / UK', value: 'RU/UK', selected: state.filters.lang === 'RU/UK' });\n"
      "          return one;\n"
      "        })(),"),
+    # Season filter (series cards): seasons parsed from release titles.
+    ("        audio_langs: tech.audio_langs,", "        audio_langs: tech.audio_langs,\n        seasons: SeasonDetect(raw?.Title),"),
+    ("      audio_codec: 'all',\n    };", "      audio_codec: 'all',\n      season: 'all',\n    };"),
+    ("        (t) => LangDetect.matches(t.audio_langs, state.filters.lang),",
+     "        (t) => LangDetect.matches(t.audio_langs, state.filters.lang),\n"
+     "        (t) => !state.filters.season || state.filters.season === 'all' || (t.seasons || []).includes(state.filters.season),"),
+    ("        buildOne('quality', 'torbox_filter_quality', state.all_torrents.map((t) => t.quality)),",
+     "        ...(state.all_torrents.some((t) => t.seasons && t.seasons.length)\n"
+     "          ? [Object.assign(buildOne('season', 'torbox_filter_quality', state.all_torrents.map((t) => t.seasons || [])), {\n"
+     "              title: Lampa.Storage.get('language', 'ru') === 'en' ? 'Season' : 'Сезон',\n"
+     "            })]\n"
+     "          : []),\n"
+     "        buildOne('quality', 'torbox_filter_quality', state.all_torrents.map((t) => t.quality)),"),
     # One quality label per tier: numeric 2160/1080/720 used to show as 2160P/1080P/720P next to 4K/FHD/HD.
     ("          if (/^\\d{3,4}P$/.test(normalized)) return normalized;\n          if (/^\\d{3,4}$/.test(normalized)) return `${normalized}P`;",
      "          const px = /^(\\d{3,4})P?$/.test(normalized) ? parseInt(normalized, 10) : 0;\n          if (px) return px >= 2160 ? '4K' : px >= 1080 ? 'FHD' : px >= 720 ? 'HD' : 'SD';"),
     # Parsers go through the CORS proxy (+1-4 s); 5 s cut off large answers (59 results for Spirited Away).
     ("    PUBLIC_PARSER_TIMEOUT_MS: 5 * 1000, // 5 seconds", "    PUBLIC_PARSER_TIMEOUT_MS: 15 * 1000, // 15 seconds (-en fork: proxy latency)"),
+    # Saved filters missing a newer key (e.g. season) must fall back to defaults instead of crashing the menu.
+    ("        return JSON.parse(Store.get('torbox_filters_v2', JSON.stringify(defaultFilters)));",
+     "        return { ...defaultFilters, ...JSON.parse(Store.get('torbox_filters_v2', JSON.stringify(defaultFilters))) };"),
     # New storage key so RU/UK default + merged quality labels apply over previously saved filters.
     ("torbox_filters_v2", "torbox_filters_v4"),
 ]
