@@ -246,8 +246,8 @@ try {
           .toUpperCase();
         if (normalized) {
           if (normalized === 'UHD' || normalized === '4K') return '4K';
-          if (/^\d{3,4}P$/.test(normalized)) return normalized;
-          if (/^\d{3,4}$/.test(normalized)) return `${normalized}P`;
+          const px = /^(\d{3,4})P?$/.test(normalized) ? parseInt(normalized, 10) : 0;
+          if (px) return px >= 2160 ? '4K' : px >= 1080 ? 'FHD' : px >= 720 ? 'HD' : 'SD';
           if (['FHD', 'HD', 'SD'].includes(normalized)) return normalized;
         }
       }
@@ -1331,9 +1331,9 @@ try {
 
     const loadFilters = () => {
       try {
-        return JSON.parse(Store.get('torbox_filters_v3', JSON.stringify(defaultFilters)));
+        return JSON.parse(Store.get('torbox_filters_v4', JSON.stringify(defaultFilters)));
       } catch {
-        Store.set('torbox_filters_v3', JSON.stringify(defaultFilters));
+        Store.set('torbox_filters_v4', JSON.stringify(defaultFilters));
         return { ...defaultFilters };
       }
     };
@@ -3269,7 +3269,7 @@ try {
           if (a.refresh) return search(true);
           if (a.reset) state.filters = JSON.parse(JSON.stringify(defaultFilters));
           else if (a.stype) state.filters[a.stype] = b.value;
-          Store.set('torbox_filters_v3', JSON.stringify(state.filters));
+          Store.set('torbox_filters_v4', JSON.stringify(state.filters));
         }
         state.last_hash = null; // reset focus
         build();

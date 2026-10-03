@@ -16,3 +16,11 @@ assert.deepEqual(d('Film.2021.1080p.BG.Subs'), ['BG-SUB']);
 assert.deepEqual(d('x', 'rutor', { ffprobe: [{ codec_type: 'audio', tags: { language: 'ukr' } }, { codec_type: 'audio', tags: { language: 'swe' } }] }), ['UK', 'SV', 'RU']);
 assert.ok(matches(['EN', 'UK'], 'RU/UK') && !matches(['EN'], 'RU/UK') && matches(['EN'], 'all') && matches(['BG'], 'BG'));
 console.log('lang ok');
+
+// Quality labels: numeric info.quality must land in the same tier as the title-based label.
+const qa = src.indexOf('    getQualityLabel('), qb = src.indexOf('    naturalEpisodeSort(');
+const { getQualityLabel } = new Function('return {' + src.slice(qa, qb) + '}')();
+for (const [q, want] of [[2160, '4K'], ['2160p', '4K'], [1080, 'FHD'], [720, 'HD'], [480, 'SD'], ['UHD', '4K']])
+  assert.equal(getQualityLabel('', { info: { quality: q } }), want, `quality ${q}`);
+assert.equal(getQualityLabel('Hamilton.2020.2160p.WEB'), '4K');
+console.log('quality ok');
