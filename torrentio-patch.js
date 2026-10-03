@@ -1,5 +1,5 @@
     // English source: Torrentio (CORS *, keyed by IMDb id). Merged with the RU parsers.
-    // ponytail: series queries S<season|1>E1 only (season packs + that episode); per-episode lookup if needed.
+    // ponytail: series ask SxxE01 for each of the last 5 seasons (season packs + first episodes); per-episode lookup if needed.
     async function searchTorrentio(movie, signal) {
       const isTv = !!(movie.name || movie.first_air_date || movie.number_of_seasons);
       let imdb = movie.imdb_id;
@@ -11,16 +11,24 @@
         } catch (_) {}
       }
       if (!imdb) return new Map();
-      const path = isTv ? `series/${imdb}:${movie.season_number || movie.season || 1}:1` : `movie/${imdb}`;
+      const lastSeason = Number(movie.number_of_seasons) || Number(movie.season_number || movie.season) || 1;
+      const paths = isTv
+        ? Array.from({ length: Math.min(lastSeason, 5) }, (_, i) => `series/${imdb}:${lastSeason - i}:1`)
+        : [`movie/${imdb}`];
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 8000);
       const onAbort = () => ctrl.abort();
       signal?.addEventListener('abort', onAbort, { once: true });
       try {
-        const res = await fetch(`https://torrentio.strem.fun/stream/${path}.json`, { signal: ctrl.signal });
-        const json = await res.json();
+        const lists = await Promise.all(
+          paths.map((path) =>
+            fetch(`https://torrentio.strem.fun/stream/${path}.json`, { signal: ctrl.signal })
+              .then((r) => r.json())
+              .then((j) => j?.streams || [], () => [])
+          )
+        );
         const map = new Map();
-        (json?.streams || []).forEach((st) => {
+        lists.flat().forEach((st) => {
           const hash = String(st.infoHash || '').toLowerCase();
           if (!Utils.isHex40(hash) || map.has(hash)) return;
           const lines = String(st.title || '').split('\n');
