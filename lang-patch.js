@@ -42,3 +42,26 @@
     return { detect, matches };
   })();
 
+  // ───────────────────────────── Movie-card result matching (-en fork) ─────────────────────────────
+  // Checked on 20 films / 2436 tracker results: hides only series and other same-name films.
+  const MovieMatch = (() => {
+    const SERIES = /сезон|серии|серия|выпуск|\bs\d{1,2}(e\d+)?\b|season|\[\d+(-\d+)?\s*(из|of)\s*\d+\]|\d+\/\d+\]/i;
+    const YEAR = /(?<!\d)(19[2-9]\d|20[0-3]\d)(?!\d)/g;
+    // years: Set of allowed years, or null to skip the year check.
+    const keep = (title, years) => {
+      const t = String(title || '');
+      if (SERIES.test(t)) return false;
+      if (!years) return true;
+      const ys = (t.match(YEAR) || []).map(Number);
+      return !ys.length || ys.some((y) => years.has(y));
+    };
+    // First release year ±1 plus the card's own year (TMDB moves release_date to re-releases).
+    const allowedYears = (releaseYears, cardYear) => {
+      const ys = (releaseYears || []).filter(Boolean);
+      if (!ys.length) return null;
+      const y0 = Math.min(...ys);
+      return new Set([y0 - 1, y0, y0 + 1, Number(cardYear) || y0]);
+    };
+    return { keep, allowedYears };
+  })();
+
