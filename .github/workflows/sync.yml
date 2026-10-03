@@ -1,0 +1,15 @@
+name: sync-upstream
+on:
+  schedule: [{ cron: '0 5 * * *' }]
+  workflow_dispatch:
+permissions: { contents: write }
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 patch.py && node --check torbox-lampa-plugin-en.js
+      - run: |
+          git diff --quiet && exit 0
+          git config user.name github-actions; git config user.email github-actions@users.noreply.github.com
+          git commit -am "sync upstream $(grep -o "VERSION = '[^']*'" torbox-lampa-plugin-en.js)" && git push
