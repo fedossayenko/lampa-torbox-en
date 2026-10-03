@@ -28,8 +28,11 @@ EDITS = [
      "          one.items.splice(1, 0, { title: 'RU / UK', value: 'RU/UK', selected: state.filters.lang === 'RU/UK' });\n"
      "          return one;\n"
      "        })(),"),
-    # New storage key so the RU/UK default applies once over previously saved filters.
-    ("torbox_filters_v2", "torbox_filters_v3"),
+    # One quality label per tier: numeric 2160/1080/720 used to show as 2160P/1080P/720P next to 4K/FHD/HD.
+    ("          if (/^\\d{3,4}P$/.test(normalized)) return normalized;\n          if (/^\\d{3,4}$/.test(normalized)) return `${normalized}P`;",
+     "          const px = /^(\\d{3,4})P?$/.test(normalized) ? parseInt(normalized, 10) : 0;\n          if (px) return px >= 2160 ? '4K' : px >= 1080 ? 'FHD' : px >= 720 ? 'HD' : 'SD';"),
+    # New storage key so RU/UK default + merged quality labels apply over previously saved filters.
+    ("torbox_filters_v2", "torbox_filters_v4"),
 ]
 
 for anchor, repl in EDITS:
