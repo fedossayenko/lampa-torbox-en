@@ -47,8 +47,32 @@
       }
     }
 
+    // RU parsers, made stricter for movie cards: TV-only categories (5xxx) are dropped, and if nothing is
+    // left the search is retried without the year (TMDB moves release_date to re-releases, e.g. Hamilton 2020 -> 2025).
+    // ponytail: no year match on the retry; a same-name film from another year can still show (its title has the year).
+    async function searchRu(movie, signal) {
+      const isMovie = !(movie.name || movie.first_air_date || movie.number_of_seasons);
+      const tvOnly = (r) => {
+        const cats = [].concat(r?.Category || []).map(Number).filter(Boolean);
+        return cats.length > 0 && cats.every((n) => n >= 5000 && n < 6000);
+      };
+      const pick = (res) => {
+        if (isMovie) res.entriesByHash.forEach((v, k) => { if (tvOnly(v)) res.entriesByHash.delete(k); });
+        return res;
+      };
+      const first = await searchPublicTrackers(movie, signal).then(pick, (e) => ({ error: e }));
+      if (first.entriesByHash?.size) return first;
+      if (!(movie.year || movie.release_date || movie.first_air_date)) {
+        if (first.error) throw first.error;
+        throw { type: 'api', message: translate('torbox_error_public_parsers_empty') };
+      }
+      const retry = pick(await searchPublicTrackers({ ...movie, year: '', release_date: '', first_air_date: '' }, signal));
+      if (!retry.entriesByHash.size) throw { type: 'api', message: translate('torbox_error_public_parsers_empty') };
+      return retry;
+    }
+
     async function searchAll(movie, signal) {
-      const [ru, en] = await Promise.allSettled([searchPublicTrackers(movie, signal), searchTorrentio(movie, signal)]);
+      const [ru, en] = await Promise.allSettled([searchRu(movie, signal), searchTorrentio(movie, signal)]);
       const enMap = en.status === 'fulfilled' ? en.value : new Map();
       if (ru.status === 'rejected') {
         if (!enMap.size) throw ru.reason;
