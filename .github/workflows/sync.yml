@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 patch.py && node --check torbox-lampa-plugin-en.js
+      - run: python3 patch.py && node --check torbox-lampa-plugin-en.js && node test-lang.mjs
       - run: |
           git diff --quiet && exit 0
           git config user.name github-actions; git config user.email github-actions@users.noreply.github.com

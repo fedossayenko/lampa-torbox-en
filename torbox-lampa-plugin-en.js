@@ -1062,6 +1062,7 @@ try {
             Size: sz ? Math.round(parseFloat(sz[1]) * mult[sz[2].toUpperCase()]) : 0,
             Seeders: Number((meta.match(/👤\s*(\d+)/) || [])[1]) || 0,
             Tracker: 'torrentio:' + ((meta.match(/⚙️\s*(.+)/) || [])[1] || '').trim(),
+            TorrentioLangs: (meta.match(/⚙️[^\n]*\n([^\n]+)/) || [])[1] || '',
           });
         });
         return map;
@@ -1111,6 +1112,50 @@ try {
       LOG('ERR', t, err);
     },
   };
+
+  // ───────────────────────────── Audio language detection (-en fork) ─────────────────────────────
+  // Two-letter codes from ffprobe tags, Torrentio flags and release-title keywords.
+  // ponytail: keyword heuristics; a title that hides its dub language is reported as its tracker's default.
+  const LangDetect = (() => {
+    const ISO3 = { rus: 'RU', ukr: 'UK', eng: 'EN', bul: 'BG', pol: 'PL', ger: 'DE', deu: 'DE', fre: 'FR', fra: 'FR', spa: 'ES', ita: 'IT', por: 'PT', jpn: 'JA', kor: 'KO', chi: 'ZH', zho: 'ZH', swe: 'SV', heb: 'HE', hin: 'HI', tur: 'TR', cze: 'CS', ces: 'CS' };
+    const COUNTRY = { GB: 'EN', US: 'EN', UA: 'UK', IL: 'HE', JP: 'JA', KR: 'KO', CN: 'ZH', BR: 'PT', MX: 'ES', IN: 'HI', SE: 'SV', DK: 'DA', GR: 'EL', CZ: 'CS', RS: 'SR' };
+    const flags = (str) =>
+      Array.from(String(str).matchAll(/([\u{1F1E6}-\u{1F1FF}])([\u{1F1E6}-\u{1F1FF}])/gu)).map((m) => {
+        const cc = String.fromCharCode(m[1].codePointAt(0) - 0x1f1e6 + 65, m[2].codePointAt(0) - 0x1f1e6 + 65);
+        return COUNTRY[cc] || cc;
+      });
+    const RU_TRACKERS = /rutracker|rutor|kinozal|nnmclub|megapeer|korsars|bitru|baibako|lostfilm|toloka|ultradox|selezen|anilibria/i;
+    function detect(raw = {}) {
+      const out = new Set();
+      const title = String(raw.Title || '');
+      const tracker = String(raw.Tracker || '');
+      (Array.isArray(raw.ffprobe) ? raw.ffprobe : [])
+        .filter((s) => s?.codec_type === 'audio')
+        .forEach((s) => {
+          const l = String(s?.tags?.language || s?.tags?.LANGUAGE || '').toLowerCase();
+          if (l) out.add(ISO3[l] || l.slice(0, 2).toUpperCase());
+        });
+      flags(raw.TorrentioLangs || '').forEach((l) => out.add(l));
+      if (/\bukr\b|укр|ukrainian|\bua\b|toloka/i.test(title + ' ' + tracker)) out.add('UK');
+      if (/\bbg[\s._-]?(audio|dub)|бг[\s._-]?аудио|bulgarian|\bbul\b|[\[(]bg[\])]/i.test(title)) out.add('BG');
+      if (/\bbg[\s._-]?subs?\b|бг[\s._-]?суб|bgsub/i.test(title)) out.add('BG-SUB');
+      if (/\brus\b|russian|\bdub\b|\bmvo\b|\bavo\b|дубляж|(^|[^а-яё])(пм|пд|дб|мво|ммо)([^а-яё]|$)/i.test(title)) out.add('RU');
+      if (/\beng\b|english/i.test(title)) out.add('EN');
+      if (/original|оригинал/i.test(title)) out.add('ORIG');
+      // Russian-tracker releases carry a Russian track unless they say "original only".
+      if (!out.has('RU') && (/[а-яё]/i.test(title) || RU_TRACKERS.test(tracker)) && !/^\s*[^/]*\[оригинал\]/i.test(title)) out.add('RU');
+      // Torrentio convention: no language line on an international release means English.
+      if (!out.size && /^torrentio:/i.test(tracker) && !raw.TorrentioLangs) out.add('EN');
+      if (/multi[\s._-]?audio|\bmulti\b/i.test(raw.TorrentioLangs || title)) out.add('MULTI');
+      return Array.from(out);
+    }
+    const matches = (langs, filterValue) => {
+      if (filterValue === 'all') return true;
+      const want = filterValue === 'RU/UK' ? ['RU', 'UK'] : [filterValue];
+      return (langs || []).some((l) => want.includes(l));
+    };
+    return { detect, matches };
+  })();
 
   // ───────────────────────────── Search helpers ─────────────────────────────
   function generateSearchCombinations(movie = {}) {
@@ -1279,16 +1324,16 @@ try {
       tracker: 'all',
       video_type: 'all',
       translation: 'all',
-      lang: 'all',
+      lang: 'RU/UK',
       video_codec: 'all',
       audio_codec: 'all',
     };
 
     const loadFilters = () => {
       try {
-        return JSON.parse(Store.get('torbox_filters_v2', JSON.stringify(defaultFilters)));
+        return JSON.parse(Store.get('torbox_filters_v3', JSON.stringify(defaultFilters)));
       } catch {
-        Store.set('torbox_filters_v2', JSON.stringify(defaultFilters));
+        Store.set('torbox_filters_v3', JSON.stringify(defaultFilters));
         return { ...defaultFilters };
       }
     };
@@ -1866,6 +1911,7 @@ try {
       if (tech.video_codec) html += tag(Utils.escapeHtml(String(tech.video_codec).toUpperCase()), 'codec');
       if (tech.has_hdr) html += tag('HDR', 'hdr');
       if (tech.has_dv) html += tag('Dolby Vision', 'dv');
+      if (tech.audio_langs && tech.audio_langs.length) html += tag(Utils.escapeHtml(tech.audio_langs.join(' · ')), 'lang');
 
       // Audio streams (resilient: show codec/lang/layout if present; tolerates missing ffprobe)
       const audioStreams = Array.isArray(raw?.ffprobe) ? raw.ffprobe.filter((s) => s?.codec_type === 'audio') : [];
@@ -1898,7 +1944,7 @@ try {
       const tech = {
         video_codec: v?.codec_name || null,
         video_resolution: v ? `${v.width}x${v.height}` : null,
-        audio_langs: [...new Set(a.map((s) => s?.tags?.language || s?.tags?.LANGUAGE).filter(Boolean))].map((x) => String(x).toUpperCase()),
+        audio_langs: LangDetect.detect(raw),
         audio_codecs: [...new Set(a.map((s) => s?.codec_name).filter(Boolean))].map((x) => String(x).toUpperCase()),
         has_hdr: /(^|\W)hdr(\W|$)/i.test(raw?.Title || '') || /hdr/i.test(raw?.info?.videotype || ''),
         has_dv: /(dv|dolby\s*vision)/i.test(raw?.Title || '') || /(dovi|dolby\s*vision)/i.test(raw?.info?.videotype || ''),
@@ -2842,7 +2888,7 @@ try {
         (t) => state.filters.quality === 'all' || t.quality === state.filters.quality,
         (t) => state.filters.video_type === 'all' || t.video_type === state.filters.video_type,
         (t) => state.filters.translation === 'all' || (Array.isArray(t.voices) && t.voices.includes(state.filters.translation)),
-        (t) => state.filters.lang === 'all' || (Array.isArray(t.audio_langs) && t.audio_langs.includes(state.filters.lang)),
+        (t) => LangDetect.matches(t.audio_langs, state.filters.lang),
         (t) => state.filters.video_codec === 'all' || (t.video_codec && t.video_codec.toUpperCase() === state.filters.video_codec.toUpperCase()),
         (t) => state.filters.audio_codec === 'all' || (Array.isArray(t.audio_codecs) && t.audio_codecs.includes(state.filters.audio_codec.toUpperCase())),
         (t) => state.filters.tracker === 'all' || (Array.isArray(t.trackers) && t.trackers.includes(state.filters.tracker)),
@@ -3040,7 +3086,11 @@ try {
         buildOne('quality', 'torbox_filter_quality', state.all_torrents.map((t) => t.quality)),
         buildOne('video_type', 'torbox_filter_video_type', state.all_torrents.map((t) => t.video_type)),
         buildOne('translation', 'torbox_filter_translation', state.all_torrents.map((t) => t.voices || [])),
-        buildOne('lang', 'torbox_filter_audio_lang', state.all_torrents.map((t) => t.audio_langs || [])),
+        (() => {
+          const one = buildOne('lang', 'torbox_filter_audio_lang', [...state.all_torrents.map((t) => t.audio_langs || []), 'BG']);
+          one.items.splice(1, 0, { title: 'RU / UK', value: 'RU/UK', selected: state.filters.lang === 'RU/UK' });
+          return one;
+        })(),
         buildOne('video_codec', 'torbox_filter_video_codec', state.all_torrents.map((t) => (t.video_codec ? [t.video_codec] : []))),
         buildOne('audio_codec', 'torbox_filter_audio_codec', state.all_torrents.map((t) => t.audio_codecs || [])),
         buildOne('tracker', 'torbox_filter_tracker', state.all_torrents.map((t) => t.trackers || [])),
@@ -3219,7 +3269,7 @@ try {
           if (a.refresh) return search(true);
           if (a.reset) state.filters = JSON.parse(JSON.stringify(defaultFilters));
           else if (a.stype) state.filters[a.stype] = b.value;
-          Store.set('torbox_filters_v2', JSON.stringify(state.filters));
+          Store.set('torbox_filters_v3', JSON.stringify(state.filters));
         }
         state.last_hash = null; // reset focus
         build();

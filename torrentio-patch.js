@@ -34,6 +34,7 @@
             Size: sz ? Math.round(parseFloat(sz[1]) * mult[sz[2].toUpperCase()]) : 0,
             Seeders: Number((meta.match(/👤\s*(\d+)/) || [])[1]) || 0,
             Tracker: 'torrentio:' + ((meta.match(/⚙️\s*(.+)/) || [])[1] || '').trim(),
+            TorrentioLangs: (meta.match(/⚙️[^\n]*\n([^\n]+)/) || [])[1] || '',
           });
         });
         return map;
