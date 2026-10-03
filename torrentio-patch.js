@@ -47,26 +47,39 @@
       }
     }
 
-    // RU parsers, made stricter for movie cards: TV-only categories (5xxx) are dropped, and if nothing is
-    // left the search is retried without the year (TMDB moves release_date to re-releases, e.g. Hamilton 2020 -> 2025).
-    // ponytail: no year match on the retry; a same-name film from another year can still show (its title has the year).
+    // RU parsers, stricter on movie cards: series and other same-name films (by first-release year) are dropped,
+    // and if nothing is left the search is retried without the year (TMDB moves release_date to re-releases).
+    async function movieYears(movie, signal) {
+      try {
+        if (movie.source && !/^(tmdb|cub)$/i.test(movie.source)) return null; // id is not a TMDB id
+        const url = Lampa.TMDB.api(`movie/${movie.id}/release_dates?api_key=${Lampa.TMDB.key()}`);
+        const json = await (await fetch(url, { signal })).json();
+        const ys = (json?.results || []).flatMap((c) => (c.release_dates || []).map((r) => parseInt(String(r.release_date).slice(0, 4), 10)));
+        const cardYear = parseInt(String(movie.release_date || movie.year || '').slice(0, 4), 10);
+        return MovieMatch.allowedYears(ys, cardYear);
+      } catch (_) {
+        return null; // unknown -> no year filtering
+      }
+    }
+
     async function searchRu(movie, signal) {
       const isMovie = !(movie.name || movie.first_air_date || movie.number_of_seasons);
-      const tvOnly = (r) => {
-        const cats = [].concat(r?.Category || []).map(Number).filter(Boolean);
-        return cats.length > 0 && cats.every((n) => n >= 5000 && n < 6000);
-      };
-      const pick = (res) => {
-        if (isMovie) res.entriesByHash.forEach((v, k) => { if (tvOnly(v)) res.entriesByHash.delete(k); });
+      const yearsP = isMovie && movie.id ? movieYears(movie, signal) : Promise.resolve(null);
+      const pick = async (res) => {
+        if (!isMovie) return res;
+        const years = await yearsP;
+        res.entriesByHash.forEach((v, k) => { if (!MovieMatch.keep(v?.Title, years)) res.entriesByHash.delete(k); });
         return res;
       };
       const first = await searchPublicTrackers(movie, signal).then(pick, (e) => ({ error: e }));
       if (first.entriesByHash?.size) return first;
+      // Retry only when the parsers answered (results filtered away, or "nothing found"), never after timeouts/outages.
+      const answered = !first.error || DebugTelemetry.parserAttempts.some((a) => a.status === 'empty');
+      if (!answered) throw first.error;
       if (!(movie.year || movie.release_date || movie.first_air_date)) {
-        if (first.error) throw first.error;
-        throw { type: 'api', message: translate('torbox_error_public_parsers_empty') };
+        throw first.error || { type: 'api', message: translate('torbox_error_public_parsers_empty') };
       }
-      const retry = pick(await searchPublicTrackers({ ...movie, year: '', release_date: '', first_air_date: '' }, signal));
+      const retry = await pick(await searchPublicTrackers({ ...movie, year: '', release_date: '', first_air_date: '' }, signal));
       if (!retry.entriesByHash.size) throw { type: 'api', message: translate('torbox_error_public_parsers_empty') };
       return retry;
     }

@@ -31,6 +31,8 @@ EDITS = [
     # One quality label per tier: numeric 2160/1080/720 used to show as 2160P/1080P/720P next to 4K/FHD/HD.
     ("          if (/^\\d{3,4}P$/.test(normalized)) return normalized;\n          if (/^\\d{3,4}$/.test(normalized)) return `${normalized}P`;",
      "          const px = /^(\\d{3,4})P?$/.test(normalized) ? parseInt(normalized, 10) : 0;\n          if (px) return px >= 2160 ? '4K' : px >= 1080 ? 'FHD' : px >= 720 ? 'HD' : 'SD';"),
+    # Parsers go through the CORS proxy (+1-4 s); 5 s cut off large answers (59 results for Spirited Away).
+    ("    PUBLIC_PARSER_TIMEOUT_MS: 5 * 1000, // 5 seconds", "    PUBLIC_PARSER_TIMEOUT_MS: 15 * 1000, // 15 seconds (-en fork: proxy latency)"),
     # New storage key so RU/UK default + merged quality labels apply over previously saved filters.
     ("torbox_filters_v2", "torbox_filters_v4"),
 ]

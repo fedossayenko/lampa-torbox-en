@@ -24,3 +24,18 @@ for (const [q, want] of [[2160, '4K'], ['2160p', '4K'], [1080, 'FHD'], [720, 'HD
   assert.equal(getQualityLabel('', { info: { quality: q } }), want, `quality ${q}`);
 assert.equal(getQualityLabel('Hamilton.2020.2160p.WEB'), '4K');
 console.log('quality ok');
+
+// Movie-card matching (series + other same-name films).
+const ma = src.indexOf('  const MovieMatch'), mb = src.indexOf('  // ───────────────────────────── Search helpers');
+const { keep, allowedYears } = new Function(src.slice(ma, mb) + '; return MovieMatch;')();
+const ham = allowedYears([2020, 2020, 2025], 2025);
+assert.ok(keep('Гамильтон / Hamilton (2020) WEB-DL [H.265/2160p] [4K, HDR, 10-bit] [EN / RU, EN Sub]', ham));
+assert.ok(keep('Hamilton.2025.UHD.BluRay.2160p', ham));                       // re-release year = card year
+assert.ok(!keep('Гамильтон / Hamilton / 1998 / ЛО / DVDRip', ham));            // other film
+assert.ok(!keep('Гамильтон /Hamilton /s01e01-09 /HD1080p WEBRip', ham));      // series
+assert.ok(!keep('Гамильтон (1 сезон: 1-10 серии из 10) / Hamilton / 2020', ham));
+assert.ok(!keep('Нечто / Item [32/32] [2019, драма]', null));
+assert.ok(keep('Унесенные призраками / Sen to Chihiro no Kamikakushi (Spirited Away) / 2001 / ДБ, СТ / BDRip (1080p)', allowedYears([2001, 2003], 2001)));
+assert.ok(keep('Гамильтон без года', ham) && keep('Anything 1998', null)); // no year / unknown years -> keep
+assert.equal(allowedYears([], 2025), null);
+console.log('movie match ok');
