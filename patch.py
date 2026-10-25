@@ -75,20 +75,30 @@ EDITS = [
      "          Lampa.Storage.set('full_btn_priority', Lampa.Utils.hash(btn.prop('outerHTML')));\n"
      "          Lampa.Storage.set('torbox_priority_set', true);\n"
      "        }"),
-    # Start the card with the cursor on that TorBox button (Lampa focuses the first .selector, which MODS's takes);
-    # once per card, so returning from a menu does not jump back.
+    # Start the card with the cursor on that TorBox button. MODS's grabs the cursor when its own loading ends,
+    # so for the first 10 s keep putting it back on TorBox; any key press by the user stops this.
     ("      Lampa.Listener.follow('full', fullListener);",
      "      Lampa.Listener.follow('full', fullListener);\n"
-     "      Lampa.Controller.listener.follow('toggle', (ev) => {\n"
-     "        const dbgRoot = Lampa.Activity.active()?.activity?.render?.();\n"
-     "        console.log('TBFOCUS toggle', ev.name, 'pri=' + (dbgRoot?.find('.button--priority.view--torbox').length || 0), 'flag=' + !!dbgRoot?.data('torbox_focused'), 'focus=' + ($('.focus').attr('class') || '-').slice(0, 60));\n"
-     "        setTimeout(() => console.log('TBFOCUS +700ms focus=' + ($('.focus').attr('class') || '-').slice(0, 60)), 700);\n"
-     "        if (ev.name !== 'full_start') return;\n"
-     "        const root = Lampa.Activity.active()?.activity?.render?.();\n"
-     "        const pri = root?.find('.button--priority.view--torbox');\n"
-     "        if (!pri?.length || root.data('torbox_focused')) return;\n"
-     "        root.data('torbox_focused', true);\n"
-     "        Lampa.Controller.collectionFocus(pri[0], root);\n"
+     "      Lampa.Listener.follow('full', (e) => {\n"
+     "        if (e.type !== 'complite') return;\n"
+     "        const root = e.object?.activity?.render?.();\n"
+     "        if (!root?.length) return;\n"
+     "        const until = Date.now() + 10000;\n"
+     "        let pressed = false;\n"
+     "        const onKey = () => { pressed = true; };\n"
+     "        document.addEventListener('keydown', onKey, true);\n"
+     "        const tick = () => {\n"
+     "          if (pressed || Date.now() > until || !document.body.contains(root[0])) {\n"
+     "            document.removeEventListener('keydown', onKey, true);\n"
+     "            return;\n"
+     "          }\n"
+     "          const pri = root.find('.button--priority.view--torbox');\n"
+     "          if (pri.length && pri[0].offsetParent && !pri.hasClass('focus') && Lampa.Controller.enabled().name === 'full_start') {\n"
+     "            Lampa.Controller.collectionFocus(pri[0], root);\n"
+     "          }\n"
+     "          setTimeout(tick, 250);\n"
+     "        };\n"
+     "        setTimeout(tick, 0);\n"
      "      });"),
     # New storage key so RU/UK default + merged quality labels apply over previously saved filters.
     ("torbox_filters_v2", "torbox_filters_v4"),
