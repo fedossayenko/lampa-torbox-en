@@ -46,8 +46,20 @@ function corsError(request, message, status) {
   return new Response(message, { status, headers: corsHeaders(request) });
 }
 
+// -en fork: film scores from MDBList, the key stays here (secret MDBLIST_API_KEY).
+// GET /mdblist/movie/<tmdb id> or /mdblist/show/<tmdb id> -> { "tomatoes": 96, "metacritic": 78, ... }
+async function mdblist(request, env, type, id) {
+  const res = await fetch(`https://api.mdblist.com/tmdb/${type}/${id}?apikey=${env.MDBLIST_API_KEY}`);
+  if (!res.ok) return corsError(request, `MDBList ${res.status}`, res.status);
+  const ratings = {};
+  for (const r of (await res.json()).ratings || []) if (r.value != null) ratings[r.source] = r.value;
+  return new Response(JSON.stringify(ratings), {
+    headers: { 'Content-Type': 'application/json', ...corsHeaders(request) },
+  });
+}
+
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
@@ -55,6 +67,9 @@ export default {
     if (!ALLOWED_METHODS.has(request.method)) {
       return corsError(request, 'Method not allowed.', 405);
     }
+
+    const scores = new URL(request.url).pathname.match(/^\/mdblist\/(movie|show)\/(\d+)$/);
+    if (scores) return mdblist(request, env, scores[1], scores[2]);
 
     const target = new URL(request.url).searchParams.get('url');
     if (!target) {
