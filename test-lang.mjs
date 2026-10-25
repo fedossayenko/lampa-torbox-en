@@ -54,13 +54,15 @@ for (const [t, want] of [
 ]) assert.deepEqual(SeasonDetect(t), want, t);
 console.log('season ok');
 
-// Film verdict (ratings-patch.js): half critics, half audience, 3+ sources.
+// Film verdict (ratings-patch.js): weighted average, RT heaviest, 3+ sources.
 const win = {};
 new Function('window', 'Lampa', src.slice(src.indexOf('// -en fork: film scores on the card')))(win, { Listener: { follow() {} } });
 const { verdict } = win.torbox_en_ratings;
-// Top Gun: Maverick from MDBList: critics (96+78+100)/3, audience mostly 80s -> Excellent.
-assert.deepEqual(verdict({ imdb: 8.2, metacritic: 78, metacriticuser: 8.4, trakt: 84, tomatoes: 96, popcorn: 99, tmdb: 81, letterboxd: 4, rogerebert: 4 }), { score: 87, word: 'Excellent' });
+// Top Gun: Maverick from MDBList (popcorn ignored): 1253 / 14.5 -> 86.
+assert.deepEqual(verdict({ imdb: 8.2, metacritic: 78, metacriticuser: 8.4, trakt: 84, tomatoes: 96, popcorn: 99, tmdb: 81, letterboxd: 4, rogerebert: 4 }), { score: 86, word: 'Excellent' });
 assert.equal(verdict({ imdb: 7, tmdb: 70 }), null); // too few sources
-assert.deepEqual(verdict({ imdb: 4.5, tmdb: 40, kp: 5 }), { score: 46, word: 'Poor' }); // audience only: (45*3+40+50*2)/6
+assert.deepEqual(verdict({ imdb: 4.5, tmdb: 40, kp: 5 }), { score: 46, word: 'Poor' }); // (45*3+40+50*2)/6
+assert.equal(verdict({ tomatoes: 90, imdb: 6, tmdb: 60 }).score, 75); // RT x4: (360+180+60)/8
+assert.equal(verdict({ imdb: 7, tmdb: 70, trakt: 70, letterboxd: 1 }).score, 65); // LB x0.5: (210+70+70+10)/5.5
 assert.equal(verdict({ imdb: 6, tmdb: 60, trakt: 60, tomatoes: 0, metacritic: null }).score, 60); // 0 and null are "no data"
 console.log('verdict ok');

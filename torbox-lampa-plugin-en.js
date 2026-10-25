@@ -4211,24 +4211,21 @@ try {
     tomatoes: 1, metacritic: 1, rogerebert: 25, // critics
     imdb: 10, letterboxd: 20, kp: 10, trakt: 1, tmdb: 1, metacriticuser: 10, // audience
   };
-  const CRITICS = ['tomatoes', 'metacritic', 'rogerebert'];
-  // ponytail: hand-picked weights; RT audience (popcorn) left out: inflated and close to IMDb.
-  const AUDIENCE = { imdb: 3, letterboxd: 2.5, kp: 2, trakt: 1.5, tmdb: 1, metacriticuser: 1 };
+  // ponytail: hand-picked weights. RT counts most, then Metacritic and IMDb; Letterboxd barely (small cinephile
+  // crowd, harsh on blockbusters). RT audience (popcorn) left out: inflated and close to IMDb.
+  const WEIGHTS = { tomatoes: 4, metacritic: 3, imdb: 3, kp: 2, rogerebert: 1, trakt: 1, tmdb: 1, metacriticuser: 1, letterboxd: 0.5 };
   const VERDICTS = [[80, 'Excellent'], [70, 'Good'], [60, 'Decent'], [50, 'Mixed'], [0, 'Poor']];
 
   function color(score) {
     return score >= 75 ? '#21d07a' : score >= 60 ? '#c8d531' : score >= 45 ? '#f0a030' : '#e8455a';
   }
 
-  // Half critics, half audience (whichever side exists); needs 3+ sources.
+  // Weighted average of the scores the film has (0 / missing = no data); needs 3+ sources.
   function verdict(r) {
-    const n = (k) => (Number.isFinite(Number(r[k])) && Number(r[k]) > 0 ? Number(r[k]) * NORM[k] : null);
-    const crit = CRITICS.map(n).filter((v) => v != null);
-    const aud = Object.keys(AUDIENCE).map((k) => [n(k), AUDIENCE[k]]).filter(([v]) => v != null);
-    if (crit.length + aud.length < 3) return null;
-    const c = crit.length ? crit.reduce((a, b) => a + b, 0) / crit.length : null;
-    const a = aud.length ? aud.reduce((s, [v, w]) => s + v * w, 0) / aud.reduce((s, [, w]) => s + w, 0) : null;
-    const score = Math.round(c != null && a != null ? (c + a) / 2 : c != null ? c : a);
+    const got = Object.keys(WEIGHTS).filter((k) => Number(r[k]) > 0);
+    if (got.length < 3) return null;
+    const sum = (f) => got.reduce((s, k) => s + f(k), 0);
+    const score = Math.round(sum((k) => Number(r[k]) * NORM[k] * WEIGHTS[k]) / sum((k) => WEIGHTS[k]));
     return { score, word: VERDICTS.find(([min]) => score >= min)[1] };
   }
 
