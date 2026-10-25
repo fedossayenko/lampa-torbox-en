@@ -97,4 +97,5 @@ for anchor, repl in EDITS:
         sys.exit(f'anchor matched {n}x, patch needs a manual update: {anchor[:80]!r}')
     src = src.replace(anchor, repl)
 src = re.sub(r"const VERSION = '([^']+)';", r"const VERSION = '\1-en';", src, count=1)
+src += open('ratings-patch.js').read()  # film scores on the card, independent of the TorBox code
 open('torbox-lampa-plugin-en.js', 'w').write(src)
