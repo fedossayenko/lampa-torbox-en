@@ -4070,6 +4070,14 @@ try {
         torrentBtn.length ? torrentBtn.after(btn) : root.find('.full-start__play').after(btn);
       };
       Lampa.Listener.follow('full', fullListener);
+      Lampa.Controller.listener.follow('toggle', (ev) => {
+        if (ev.name !== 'full_start') return;
+        const root = Lampa.Activity.active()?.activity?.render?.();
+        const pri = root?.find('.button--priority.view--torbox');
+        if (!pri?.length || root.data('torbox_focused')) return;
+        root.data('torbox_focused', true);
+        Lampa.Controller.collectionFocus(pri[0], root);
+      });
 
       // Scoped styles (inject once)
       if (!document.getElementById('torbox-stable-styles')) {
