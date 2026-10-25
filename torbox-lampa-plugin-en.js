@@ -4061,6 +4061,10 @@ try {
           `<div class="full-start__button selector view--torbox" data-subtitle="TorBox">${ICON}<span>TorBox</span></div>`
         );
         btn.on('hover:enter', () => launchTorBox(e.data.movie || {}));
+        if (!Lampa.Storage.get('torbox_priority_set', false)) {
+          Lampa.Storage.set('full_btn_priority', Lampa.Utils.hash(btn.prop('outerHTML')));
+          Lampa.Storage.set('torbox_priority_set', true);
+        }
 
         const torrentBtn = root.find('.view--torrent');
         torrentBtn.length ? torrentBtn.after(btn) : root.find('.full-start__play').after(btn);
