@@ -67,6 +67,14 @@ EDITS = [
      "        const chunk = hashes.slice(i, i + 100);"),
     ("          LOG('checkCached error:', e.message || e);\n        }\n      }\n      return acc;",
      "          LOG('checkCached error:', e.message || e);\n        }\n      }));\n      return acc;"),
+    # TorBox becomes Lampa's priority source once: Lampa puts it first on every card (after plugins such as
+    # MODS's add theirs), no long-press needed. Long-press the button to undo; the flag keeps it undone.
+    ("        btn.on('hover:enter', () => launchTorBox(e.data.movie || {}));",
+     "        btn.on('hover:enter', () => launchTorBox(e.data.movie || {}));\n"
+     "        if (!Lampa.Storage.get('torbox_priority_set', false)) {\n"
+     "          Lampa.Storage.set('full_btn_priority', Lampa.Utils.hash(btn.prop('outerHTML')));\n"
+     "          Lampa.Storage.set('torbox_priority_set', true);\n"
+     "        }"),
     # New storage key so RU/UK default + merged quality labels apply over previously saved filters.
     ("torbox_filters_v2", "torbox_filters_v4"),
 ]
