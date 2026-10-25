@@ -6,6 +6,8 @@ Plugin URL for Lampa:
 
     https://fedossayenko.github.io/lampa-torbox-en/torbox-lampa-plugin-en.js
 
+Proxy: TorBox blocks browser (CORS) calls, so the plugin goes through `proxy/`, upstream's locked-down Cloudflare Worker deployed as `https://torbox-proxy.sayenkofedor.workers.dev` (`cd proxy && npx wrangler@4 deploy`). It forwards the API key only to api.torbox.app.
+
 Auto-sync: `.github/workflows/sync.yml` runs daily, pulls upstream, re-applies `torrentio-patch.js` via `patch.py`, commits if changed. If upstream moves the anchor line the run fails (GitHub emails you) and the published file stays on the last good version.
 
 ## Languages

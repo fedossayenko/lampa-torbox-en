@@ -49,6 +49,24 @@ EDITS = [
     # Saved filters missing a newer key (e.g. season) must fall back to defaults instead of crashing the menu.
     ("        return JSON.parse(Store.get('torbox_filters_v2', JSON.stringify(defaultFilters)));",
      "        return { ...defaultFilters, ...JSON.parse(Store.get('torbox_filters_v2', JSON.stringify(defaultFilters))) };"),
+    # Own Cloudflare Worker (proxy/ in this repo) instead of upstream's, which saw every API key.
+    ("  const DEFAULT_PROXY_URL = 'https://my-torbox-proxy.slonce70.workers.dev';",
+     "  const DEFAULT_PROXY_URL = 'https://torbox-proxy.sayenkofedor.workers.dev';"),
+    # A degraded TorBox answers in 15-45 s (Oct 2026); at 20 s every pick timed out.
+    ("    TORBOX_API_TIMEOUT_MS: 20 * 1000, // 20 seconds",
+     "    TORBOX_API_TIMEOUT_MS: 60 * 1000, // 60 seconds (-en fork: TorBox answers in 15-45 s when degraded)"),
+    # jacred.xyz is dead (HTTP/2 errors) and on Lampa's own plugin blacklist; a MaxVol miss waited 15 s on it.
+    ("    { name: 'Jacred', url: 'jacred.xyz', key: '' },\n", ""),
+    # Cache check: 100-hash chunks in parallel, not one after another (~170 hashes = 2 sequential slow calls).
+    ("      for (let i = 0; i < hashes.length; i += 100) {\n"
+     "        if (signal?.aborted) break; // stop issuing chunk requests once cancelled\n"
+     "        const chunk = hashes.slice(i, i + 100);",
+     "      const starts = [];\n"
+     "      for (let i = 0; i < hashes.length; i += 100) starts.push(i);\n"
+     "      await Promise.all(starts.map(async (i) => {\n"
+     "        const chunk = hashes.slice(i, i + 100);"),
+    ("          LOG('checkCached error:', e.message || e);\n        }\n      }\n      return acc;",
+     "          LOG('checkCached error:', e.message || e);\n        }\n      }));\n      return acc;"),
     # New storage key so RU/UK default + merged quality labels apply over previously saved filters.
     ("torbox_filters_v2", "torbox_filters_v4"),
 ]
