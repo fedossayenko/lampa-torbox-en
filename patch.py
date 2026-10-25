@@ -80,6 +80,9 @@ EDITS = [
     ("      Lampa.Listener.follow('full', fullListener);",
      "      Lampa.Listener.follow('full', fullListener);\n"
      "      Lampa.Controller.listener.follow('toggle', (ev) => {\n"
+     "        const dbgRoot = Lampa.Activity.active()?.activity?.render?.();\n"
+     "        console.log('TBFOCUS toggle', ev.name, 'pri=' + (dbgRoot?.find('.button--priority.view--torbox').length || 0), 'flag=' + !!dbgRoot?.data('torbox_focused'), 'focus=' + ($('.focus').attr('class') || '-').slice(0, 60));\n"
+     "        setTimeout(() => console.log('TBFOCUS +700ms focus=' + ($('.focus').attr('class') || '-').slice(0, 60)), 700);\n"
      "        if (ev.name !== 'full_start') return;\n"
      "        const root = Lampa.Activity.active()?.activity?.render?.();\n"
      "        const pri = root?.find('.button--priority.view--torbox');\n"
