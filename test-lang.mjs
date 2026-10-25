@@ -68,7 +68,7 @@ assert.equal(verdict({ imdb: 6, tmdb: 60, trakt: 60, tomatoes: 0, metacritic: nu
 console.log('verdict ok');
 
 // "For you" ranking (grades-patch.js): summed seed weights, Bad seeds subtract, graded/watched and obscure films out.
-const stub = { Listener: { follow() {} }, Storage: { get: () => ({}) }, ContentRows: { add() {} } };
+const stub = { Listener: { follow() {} }, Storage: { get: () => ({}) }, ContentRows: { add() {} }, Component: { add() {} } };
 new Function('window', 'Lampa', '$', src.slice(src.indexOf('// -en fork: your own grades')))(win, stub, () => ({}));
 const { rank } = win.torbox_en_grades;
 const f = (id, extra = {}) => ({ id, title: 'f' + id, vote_count: 1000, vote_average: 7, ...extra });
