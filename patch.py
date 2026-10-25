@@ -111,4 +111,5 @@ for anchor, repl in EDITS:
     src = src.replace(anchor, repl)
 src = re.sub(r"const VERSION = '([^']+)';", r"const VERSION = '\1-en';", src, count=1)
 src += open('ratings-patch.js').read()  # film scores on the card, independent of the TorBox code
+src += open('grades-patch.js').read()  # your grades + "For you" row, uses ratings-patch.js for the quality filter
 open('torbox-lampa-plugin-en.js', 'w').write(src)

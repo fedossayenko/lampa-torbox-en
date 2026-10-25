@@ -135,9 +135,32 @@
     vote.text(v.score).css('color', color(v.score));
   }
 
+  let postersOffUntil = 0;
+  // One MDBList batch (up to 200 films = 1 request) -> { id: ratings }; films not on MDBList are cached as empty.
+  function batch(type, ids) {
+    return fetch(API + type, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) })
+      .then((res) => {
+        // Keep the last 100 daily requests for opened cards.
+        if (Number(res.headers.get('X-RateLimit-Remaining') || Infinity) < 100) postersOffUntil = Date.now() + 3600 * 1000;
+        return res.ok ? res.json() : null;
+      })
+      .then((all) => {
+        const out = {};
+        if (all) ids.forEach((id) => save(type, id, (out[id] = all[id] || {})));
+        return out;
+      })
+      .catch(() => ({}));
+  }
+  // Cached scores plus one batch for the rest (used by the "For you" row in grades-patch.js).
+  function scores(type, ids) {
+    const out = {};
+    const missing = ids.filter((id) => !(out[id] = cached(type, id)));
+    if (!missing.length || Date.now() < postersOffUntil) return Promise.resolve(out);
+    return batch(type, missing.slice(0, 200)).then((r) => Object.assign(out, r));
+  }
+
   const queue = { movie: new Map(), show: new Map() }; // id -> [[html, card], ...]
   let timer = null;
-  let postersOffUntil = 0;
   function flush() {
     timer = null;
     for (const type of ['movie', 'show']) {
@@ -145,21 +168,9 @@
       const waiting = ids.map((id) => [id, queue[type].get(id)]);
       ids.forEach((id) => queue[type].delete(id));
       if (!ids.length) continue;
-      fetch(API + type, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) })
-        .then((res) => {
-          // Keep the last 100 daily requests for opened cards.
-          if (Number(res.headers.get('X-RateLimit-Remaining') || Infinity) < 100) postersOffUntil = Date.now() + 3600 * 1000;
-          return res.ok ? res.json() : null;
-        })
-        .then((all) => {
-          if (!all) return;
-          for (const [id, cards] of waiting) {
-            const r = all[id] || {}; // not on MDBList: cached as empty
-            save(type, id, r);
-            cards.forEach(([html, card]) => drawPoster(html, r, card));
-          }
-        })
-        .catch(() => {});
+      batch(type, ids).then((all) => {
+        for (const [id, cards] of waiting) if (all[id]) cards.forEach(([html, card]) => drawPoster(html, all[id], card));
+      });
     }
     if (queue.movie.size || queue.show.size) timer = setTimeout(flush, 0);
   }
@@ -182,5 +193,5 @@
     };
   }
 
-  window.torbox_en_ratings = { verdict }; // load guard + self-check hook (node test-lang.mjs)
+  window.torbox_en_ratings = { verdict, scores }; // load guard, self-check hook (node test-lang.mjs), grades-patch.js
 })();
