@@ -4070,16 +4070,26 @@ try {
         torrentBtn.length ? torrentBtn.after(btn) : root.find('.full-start__play').after(btn);
       };
       Lampa.Listener.follow('full', fullListener);
-      Lampa.Controller.listener.follow('toggle', (ev) => {
-        const dbgRoot = Lampa.Activity.active()?.activity?.render?.();
-        console.log('TBFOCUS toggle', ev.name, 'pri=' + (dbgRoot?.find('.button--priority.view--torbox').length || 0), 'flag=' + !!dbgRoot?.data('torbox_focused'), 'focus=' + ($('.focus').attr('class') || '-').slice(0, 60));
-        setTimeout(() => console.log('TBFOCUS +700ms focus=' + ($('.focus').attr('class') || '-').slice(0, 60)), 700);
-        if (ev.name !== 'full_start') return;
-        const root = Lampa.Activity.active()?.activity?.render?.();
-        const pri = root?.find('.button--priority.view--torbox');
-        if (!pri?.length || root.data('torbox_focused')) return;
-        root.data('torbox_focused', true);
-        Lampa.Controller.collectionFocus(pri[0], root);
+      Lampa.Listener.follow('full', (e) => {
+        if (e.type !== 'complite') return;
+        const root = e.object?.activity?.render?.();
+        if (!root?.length) return;
+        const until = Date.now() + 10000;
+        let pressed = false;
+        const onKey = () => { pressed = true; };
+        document.addEventListener('keydown', onKey, true);
+        const tick = () => {
+          if (pressed || Date.now() > until || !document.body.contains(root[0])) {
+            document.removeEventListener('keydown', onKey, true);
+            return;
+          }
+          const pri = root.find('.button--priority.view--torbox');
+          if (pri.length && pri[0].offsetParent && !pri.hasClass('focus') && Lampa.Controller.enabled().name === 'full_start') {
+            Lampa.Controller.collectionFocus(pri[0], root);
+          }
+          setTimeout(tick, 250);
+        };
+        setTimeout(tick, 0);
       });
 
       // Scoped styles (inject once)
