@@ -2,7 +2,8 @@
 // -en fork: your own grades and suggestions from them. Four grades, Netflix-style plus "OK":
 // Loved (+2) and Good (+1) pull in similar films, Bad (-1) pushes them away, OK (0) only marks it watched.
 // Grades live in Lampa's storage on this device (torbox_grades). The main screen gets two rows:
-// "For you" (TMDB recommendations of graded films) and "Rate what you watched" (played past 70%, no grade yet).
+// "For you" (TMDB recommendations of graded films) and "Rate what you watched" (played past 70%, no grade yet);
+// the left menu gets a "Rate films" page with every played film.
 (function () {
   if (window.torbox_en_grades) return;
   const GRADES = [[2, 'Loved', '#21d07a'], [1, 'Good', '#c8d531'], [0, 'OK', '#f0a030'], [-1, 'Bad', '#e8455a']];
@@ -88,19 +89,76 @@
     opts.length ? opts.before(btn) : root.find('.full-start-new__buttons, .full-start__buttons').first().append(btn);
   });
 
-  // Played past 70% (series: any episode). ponytail: seasons 1-30 x episodes 1-30 scanned, longer seasons missed.
-  function watched(card) {
-    if (typeOf(card) === 'movie') return Lampa.Timeline.watched(card) >= 70;
-    for (let s = 1; s <= Math.min(card.number_of_seasons || 30, 30); s++)
-      for (let e = 1; e <= 30; e++) if (Lampa.Timeline.watchedEpisode(card, s, e) >= 70) return true;
-    return false;
+  // Played %, series: the best episode. ponytail: seasons 1-30 x episodes 1-30 scanned, longer seasons missed.
+  function progress(card) {
+    if (typeOf(card) === 'movie') return Lampa.Timeline.watched(card) || 0;
+    let max = 0;
+    for (let s = 1; s <= Math.min(card.number_of_seasons || 30, 30); s++) {
+      for (let e = 1; e <= 30; e++) {
+        const p = Lampa.Timeline.watchedEpisode(card, s, e) || 0;
+        if (p >= 70) return p;
+        max = Math.max(max, p);
+      }
+    }
+    return max;
   }
-  // Both rows need it while one main screen loads (series scan ~40 ms on a Mac, more on the stick): computed once.
+  // History with progress, newest first. Several callers per screen (series scan ~40 ms on a Mac, more on the
+  // stick): computed once.
   let seen = { t: 0, list: [] };
-  function watchedCards() {
-    if (Date.now() - seen.t > 10000) seen = { t: Date.now(), list: Lampa.Favorite.get({ type: 'history' }).filter((c) => usable(c) && watched(c)) };
+  function history() {
+    if (Date.now() - seen.t > 10000) {
+      seen = { t: Date.now(), list: Lampa.Favorite.get({ type: 'history' }).filter(usable).map((c) => [c, progress(c)]) };
+    }
     return seen.list;
   }
+  const watchedCards = () => history().filter(([, p]) => p >= 70).map(([c]) => c);
+
+  // OK on a poster: the grade menu straight away, the film page is its last item. Graded posters dim, the cursor stays.
+  function gradeHere(card) {
+    return function () {
+      const html = this.html;
+      ask(card, () => {
+        badge(html, card);
+        $(html).css('opacity', 0.4);
+      }, [{ title: 'Open film page', action: () => Lampa.Router.call('full', card) }]);
+    };
+  }
+
+  // "Rate films" page (left menu): not graded yet (played past 70% first, then partly played), then graded ones
+  // to change, newest first. Films only opened (0%) are left out: mostly tests.
+  function pageList() {
+    const full = {};
+    history().forEach(([c]) => { full[keyOf(c)] = c; });
+    const todo = history().filter(([c, p]) => p > 0 && !grades[keyOf(c)]);
+    return todo.filter(([, p]) => p >= 70).concat(todo.filter(([, p]) => p < 70)).map(([c]) => c)
+      .concat(Object.keys(grades).filter((k) => grades[k].g !== SKIP).sort((a, b) => grades[b].t - grades[a].t)
+        .map((k) => full[k] || grades[k].card));
+  }
+  function RatePage(object) {
+    const comp = Lampa.Maker.make('Category', object);
+    const list = pageList();
+    let page = 1;
+    const part = () => ({ results: list.slice((page - 1) * 40, page * 40), page, total_pages: Math.ceil(list.length / 40) });
+    comp.use({
+      onCreate() {
+        list.length ? this.build(part()) : this.empty();
+      },
+      onNext(resolve, reject) {
+        if (page * 40 >= list.length) return reject();
+        page++;
+        resolve(part());
+      },
+      onInstance(item, card) {
+        item.use({ onlyEnter: gradeHere(card), onFocus: () => Lampa.Background.change(Lampa.Utils.cardImgBackground(card)) });
+      },
+    });
+    return comp;
+  }
+  Lampa.Component.add('torbox_rate', RatePage);
+  const openPage = () => Lampa.Activity.push({ url: '', title: 'Rate films', component: 'torbox_rate', page: 1 });
+  const addMenu = () => Lampa.Menu.addButton(ICON, 'Rate films', openPage);
+  if (window.appready) addMenu();
+  else Lampa.Listener.follow('app', (e) => { if (e.type === 'ready') addMenu(); });
 
   // lists: [[weight, [card, ...]], ...] -> cards by summed weight (higher in a list counts more), minus `skip` keys.
   function rank(lists, skip) {
@@ -172,25 +230,18 @@
       };
     },
   });
-  // OK on a poster here opens the grade menu straight away; the film page is one item down the menu.
+  // "More" on this row opens the Rate films page.
   Lampa.ContentRows.add({
     name: 'torbox_rate',
     title: 'Rate what you watched',
     index: 2,
     screen: ['main'],
     call: () => {
-      const results = watchedCards().filter((c) => !grades[keyOf(c)]).slice(0, 40).map((c) => ({
-        ...c,
-        params: { emit: { onlyEnter() {
-          const html = this.html;
-          ask(c, () => {
-            badge(html, c);
-            $(html).css('opacity', 0.4);
-          }, [{ title: 'Open film page', action: () => Lampa.Router.call('full', c) }]);
-        } } },
-      }));
+      const results = watchedCards().filter((c) => !grades[keyOf(c)]).slice(0, 40)
+        .map((c) => ({ ...c, params: { emit: { onlyEnter: gradeHere(c) } } }));
       if (!results.length) return;
-      return (call) => call({ title: 'Rate what you watched', results });
+      // total_pages 2: Lampa shows "More" only on rows with more than one page.
+      return (call) => call({ title: 'Rate what you watched', results, total_pages: 2, params: { emit: { onlyMore: openPage } } });
     },
   });
 
