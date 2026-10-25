@@ -48,13 +48,47 @@ function corsError(request, message, status) {
 
 // -en fork: film scores from MDBList, the key stays here (secret MDBLIST_API_KEY).
 // GET /mdblist/movie/<tmdb id> or /mdblist/show/<tmdb id> -> { "tomatoes": 96, "metacritic": 78, ... }
-async function mdblist(request, env, type, id) {
-  const res = await fetch(`https://api.mdblist.com/tmdb/${type}/${id}?apikey=${env.MDBLIST_API_KEY}`);
-  if (!res.ok) return corsError(request, `MDBList ${res.status}`, res.status);
+// POST /mdblist/movie or /mdblist/show with {"ids": [<tmdb id>, ...]} (up to 200) -> { "<id>": { ratings }, ... }
+// X-RateLimit-Remaining is passed on so the plugin can stop poster lookups before the daily limit.
+// Letterboxd `value` is 0-5 in a single answer but 0-10 in a batch answer; its `score` (0-100) is the same in both.
+function ratingsOf(media) {
   const ratings = {};
-  for (const r of (await res.json()).ratings || []) if (r.value != null) ratings[r.source] = r.value;
-  return new Response(JSON.stringify(ratings), {
-    headers: { 'Content-Type': 'application/json', ...corsHeaders(request) },
+  for (const r of media.ratings || []) {
+    if (r.value != null) ratings[r.source] = r.source === 'letterboxd' && r.score != null ? r.score / 20 : r.value;
+  }
+  return ratings;
+}
+
+async function mdblist(request, env, type, id) {
+  let res;
+  if (id) {
+    res = await fetch(`https://api.mdblist.com/tmdb/${type}/${id}?apikey=${env.MDBLIST_API_KEY}`);
+  } else {
+    let ids;
+    try {
+      ids = (await request.json()).ids;
+    } catch {}
+    if (!Array.isArray(ids) || !ids.length || ids.length > 200 || !ids.every((x) => /^\d+$/.test(String(x)))) {
+      return corsError(request, 'Bad request: "ids" must be 1-200 TMDB ids.', 400);
+    }
+    res = await fetch(`https://api.mdblist.com/tmdb/${type}?apikey=${env.MDBLIST_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: ids.map(String) }),
+    });
+  }
+  if (!res.ok) return corsError(request, `MDBList ${res.status}`, res.status);
+  const json = await res.json();
+  let body = {};
+  if (id) body = ratingsOf(json);
+  else for (const m of Array.isArray(json) ? json : []) if (m.ids && m.ids.tmdb) body[m.ids.tmdb] = ratingsOf(m);
+  return new Response(JSON.stringify(body), {
+    headers: {
+      'Content-Type': 'application/json',
+      'X-RateLimit-Remaining': res.headers.get('X-RateLimit-Remaining') || '',
+      'Access-Control-Expose-Headers': 'X-RateLimit-Remaining',
+      ...corsHeaders(request),
+    },
   });
 }
 
@@ -68,8 +102,8 @@ export default {
       return corsError(request, 'Method not allowed.', 405);
     }
 
-    const scores = new URL(request.url).pathname.match(/^\/mdblist\/(movie|show)\/(\d+)$/);
-    if (scores) return mdblist(request, env, scores[1], scores[2]);
+    const scores = new URL(request.url).pathname.match(/^\/mdblist\/(movie|show)(?:\/(\d+))?$/);
+    if (scores && (scores[2] || request.method === 'POST')) return mdblist(request, env, scores[1], scores[2]);
 
     const target = new URL(request.url).searchParams.get('url');
     if (!target) {
