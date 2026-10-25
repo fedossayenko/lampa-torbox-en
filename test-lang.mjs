@@ -56,7 +56,7 @@ console.log('season ok');
 
 // Film verdict (ratings-patch.js): weighted average, RT heaviest, 3+ sources.
 const win = {};
-new Function('window', 'Lampa', src.slice(src.indexOf('// -en fork: film scores on the card')))(win, { Listener: { follow() {} } });
+new Function('window', 'Lampa', src.slice(src.indexOf('// -en fork: film scores on the card'), src.indexOf('// -en fork: your own grades')))(win, { Listener: { follow() {} } });
 const { verdict } = win.torbox_en_ratings;
 // Top Gun: Maverick from MDBList (popcorn ignored): 1253 / 14.5 -> 86.
 assert.deepEqual(verdict({ imdb: 8.2, metacritic: 78, metacriticuser: 8.4, trakt: 84, tomatoes: 96, popcorn: 99, tmdb: 81, letterboxd: 4, rogerebert: 4 }), { score: 86, word: 'Excellent' });
@@ -66,3 +66,17 @@ assert.equal(verdict({ tomatoes: 90, imdb: 6, tmdb: 60 }).score, 75); // RT x4: 
 assert.equal(verdict({ imdb: 7, tmdb: 70, trakt: 70, letterboxd: 1 }).score, 65); // LB x0.5: (210+70+70+10)/5.5
 assert.equal(verdict({ imdb: 6, tmdb: 60, trakt: 60, tomatoes: 0, metacritic: null }).score, 60); // 0 and null are "no data"
 console.log('verdict ok');
+
+// "For you" ranking (grades-patch.js): summed seed weights, Bad seeds subtract, graded/watched and obscure films out.
+const stub = { Listener: { follow() {} }, Storage: { get: () => ({}) }, ContentRows: { add() {} } };
+new Function('window', 'Lampa', '$', src.slice(src.indexOf('// -en fork: your own grades')))(win, stub, () => ({}));
+const { rank } = win.torbox_en_grades;
+const f = (id, extra = {}) => ({ id, title: 'f' + id, vote_count: 1000, vote_average: 7, ...extra });
+const ranked = rank([
+  [2, [f(1), f(2), f(3)]],              // Loved seed
+  [1, [f(2), f(4), f(5, { vote_count: 20 })]], // Good seed; f5 too obscure
+  [-1, [f(3), f(6)]],                   // Bad seed pushes f3 down and f6 out
+], new Set(['movie_4']));               // f4 already graded
+assert.deepEqual(ranked.map((c) => c.id), [2, 1, 3]);
+assert.equal(rank([[2, [f(7, { name: 'show' })]]], new Set(['movie_7'])).length, 1); // series key differs from film key
+console.log('for you ok');
