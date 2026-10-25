@@ -29,7 +29,7 @@ try {
   const CONST = {
     CACHE_LIMIT: 128,
     CACHE_TTL_MS: 10 * 60 * 1000, // 10 minutes
-    TORBOX_API_TIMEOUT_MS: 20 * 1000, // 20 seconds
+    TORBOX_API_TIMEOUT_MS: 60 * 1000, // 60 seconds (-en fork: TorBox answers in 15-45 s when degraded)
     PUBLIC_PARSER_TIMEOUT_MS: 15 * 1000, // 15 seconds (-en fork: proxy latency)
     PARSER_COOLDOWN_MS: 15 * 60 * 1000, // 15 minutes
     TRACKING_POLL_INTERVAL_MS: 10 * 1000, // 10 seconds
@@ -49,7 +49,6 @@ try {
     // These are TorBox-compatible tracker indexer gateways frequently used by Lampa plugins.
     // If one is down, the next will be tried.
     { name: 'MaxVol', url: 'jr.maxvol.pro', key: '' },
-    { name: 'Jacred', url: 'jacred.xyz', key: '' },
   ];
 
   const ICON =
@@ -134,7 +133,7 @@ try {
   };
 
   // User-entered connection values (stored below) always take precedence.
-  const DEFAULT_PROXY_URL = 'https://my-torbox-proxy.slonce70.workers.dev';
+  const DEFAULT_PROXY_URL = 'https://torbox-proxy.sayenkofedor.workers.dev';
 
   const Config = {
     get debug() {
@@ -961,8 +960,9 @@ try {
       // TorBox accepts up to 100 hashes per call. Returns { data: { [hashHexLower]: true/false } }
       if (!Array.isArray(hashes) || !hashes.length) return {};
       const acc = {};
-      for (let i = 0; i < hashes.length; i += 100) {
-        if (signal?.aborted) break; // stop issuing chunk requests once cancelled
+      const starts = [];
+      for (let i = 0; i < hashes.length; i += 100) starts.push(i);
+      await Promise.all(starts.map(async (i) => {
         const chunk = hashes.slice(i, i + 100);
         const qs = new URLSearchParams();
         chunk.forEach((h) => qs.append('hash', h));
@@ -978,7 +978,7 @@ try {
         } catch (e) {
           LOG('checkCached error:', e.message || e);
         }
-      }
+      }));
       return acc;
     }
 
