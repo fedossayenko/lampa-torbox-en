@@ -4071,6 +4071,9 @@ try {
       };
       Lampa.Listener.follow('full', fullListener);
       Lampa.Controller.listener.follow('toggle', (ev) => {
+        const dbgRoot = Lampa.Activity.active()?.activity?.render?.();
+        console.log('TBFOCUS toggle', ev.name, 'pri=' + (dbgRoot?.find('.button--priority.view--torbox').length || 0), 'flag=' + !!dbgRoot?.data('torbox_focused'), 'focus=' + ($('.focus').attr('class') || '-').slice(0, 60));
+        setTimeout(() => console.log('TBFOCUS +700ms focus=' + ($('.focus').attr('class') || '-').slice(0, 60)), 700);
         if (ev.name !== 'full_start') return;
         const root = Lampa.Activity.active()?.activity?.render?.();
         const pri = root?.find('.button--priority.view--torbox');
