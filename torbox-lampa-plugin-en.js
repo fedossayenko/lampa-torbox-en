@@ -4592,8 +4592,8 @@ try {
     });
   } catch (_) {}
 
-  // Our verdict (ratings-patch.js, one MDBList batch per type, cached) keeps Decent (60+) or better;
-  // films MDBList can't score need TMDB 6.5+.
+  // Our verdict (ratings-patch.js, one MDBList batch per type, cached) keeps Mixed (50+) or better: 97% of the films
+  // graded Good/Loved score 50+ (219 grades, Oct 2026), 60 dropped 8% of them. Films MDBList can't score need TMDB 6.5+.
   function decent(list) {
     const R = window.torbox_en_ratings;
     if (!R || !R.scores) return Promise.resolve(list);
@@ -4602,7 +4602,7 @@ try {
       list.filter((c) => {
         const r = (typeOf(c) === 'movie' ? movies : shows)[c.id];
         const v = r && R.verdict({ kp: c.kp_rating, ...r });
-        return v ? v.score >= 60 : c.vote_average >= 6.5;
+        return v ? v.score >= 50 : c.vote_average >= 6.5;
       }));
   }
 
