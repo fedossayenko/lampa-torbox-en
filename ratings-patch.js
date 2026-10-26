@@ -151,12 +151,14 @@
       })
       .catch(() => ({}));
   }
-  // Cached scores plus one batch for the rest (used by the "For you" row in grades-patch.js).
+  // Cached scores plus one batch per 200 of the rest (used by "For you" in grades-patch.js).
   function scores(type, ids) {
     const out = {};
     const missing = ids.filter((id) => !(out[id] = cached(type, id)));
     if (!missing.length || Date.now() < postersOffUntil) return Promise.resolve(out);
-    return batch(type, missing.slice(0, 200)).then((r) => Object.assign(out, r));
+    const chunks = [];
+    for (let i = 0; i < missing.length; i += 200) chunks.push(missing.slice(i, i + 200));
+    return Promise.all(chunks.map((c) => batch(type, c))).then((rs) => Object.assign(out, ...rs));
   }
 
   const queue = { movie: new Map(), show: new Map() }; // id -> [[html, card], ...]
