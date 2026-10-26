@@ -1,7 +1,7 @@
 
 // -en fork: your own grades and suggestions from them. Four grades, Netflix-style plus "OK":
 // Loved (+2) and Good (+1) pull in similar films, Bad (-1) pushes them away, OK (0) only marks it watched.
-// Grades live in Lampa's storage on this device (torbox_grades). The main screen gets two rows:
+// Grades live in Lampa's storage (torbox_grades), synced across devices on the same CUB account. The main screen gets two rows:
 // "For you" (TMDB recommendations of graded films) and "Rate what you watched" (played past 70%, no grade yet);
 // the left menu gets a "For you" page (top picks + a row per Loved/Good film) and a "Rate films" page.
 (function () {
@@ -15,8 +15,10 @@
   const keyOf = (card) => typeOf(card) + '_' + card.id;
   // Cards from other sources (e.g. KP) don't carry a TMDB id.
   const usable = (card) => card && card.id && (!card.source || /^(tmdb|cub)$/i.test(card.source));
-  const grades = Lampa.Storage.get('torbox_grades', {}) || {}; // this device is the only writer
-  const gradeOf = (card) => grades[keyOf(card)];
+  const grades = Lampa.Storage.get('torbox_grades', {}) || {};
+  // A removed grade stays as { g: null, t } so the removal reaches the other devices (sync below).
+  const live = (k) => !!grades[k] && grades[k].g != null;
+  const gradeOf = (card) => (live(keyOf(card)) ? grades[keyOf(card)] : undefined);
   // What a poster needs, not the whole TMDB answer.
   function slim(c) {
     const o = {};
@@ -27,10 +29,41 @@
   }
   const animated = (c) => (c.genre_ids || []).includes(16);
   function setGrade(card, g) {
-    if (g === undefined) delete grades[keyOf(card)];
-    else grades[keyOf(card)] = { g, t: Date.now(), card: slim(card) };
+    grades[keyOf(card)] = g === undefined ? { g: null, t: Date.now() } : { g, t: Date.now(), card: slim(card) };
     Lampa.Storage.set('torbox_grades', grades);
+    syncSoon();
   }
+
+  // Grades are shared by every Lampa signed in to the same CUB account and profile (the TV, Lampa in a browser),
+  // through our worker (proxy/, KV; it checks the CUB sign-in with CUB and doesn't keep it). Synced at start and
+  // 5 s after the last grade; per film the newer grade wins.
+  const SYNC = 'https://torbox-proxy.sayenkofedor.workers.dev/grades';
+  let syncTimer = null;
+  function sync() {
+    const a = Lampa.Storage.get('account', {}) || {};
+    if (!a.token || !a.profile) return;
+    fetch(SYNC, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Cub-Token': a.token, 'X-Cub-Profile': String(a.profile.id) },
+      body: JSON.stringify({ grades }),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((all) => {
+        let changed = false;
+        Object.keys(all || {}).forEach((k) => {
+          if (grades[k] && grades[k].t >= all[k].t) return;
+          grades[k] = all[k];
+          changed = true;
+        });
+        if (changed) Lampa.Storage.set('torbox_grades', grades);
+      })
+      .catch(() => {});
+  }
+  function syncSoon() {
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(sync, 5000);
+  }
+  sync();
 
   // `more`: extra menu items {title, action} after the grades.
   function ask(card, done, more) {
@@ -131,9 +164,9 @@
   function pageList() {
     const full = {};
     history().forEach(([c]) => { full[keyOf(c)] = c; });
-    const todo = history().filter(([c, p]) => p > 0 && !grades[keyOf(c)]);
+    const todo = history().filter(([c, p]) => p > 0 && !gradeOf(c));
     return todo.filter(([, p]) => p >= 70).concat(todo.filter(([, p]) => p < 70)).map(([c]) => c)
-      .concat(Object.keys(grades).filter((k) => grades[k].g !== SKIP).sort((a, b) => grades[b].t - grades[a].t)
+      .concat(Object.keys(grades).filter((k) => live(k) && grades[k].g !== SKIP).sort((a, b) => grades[b].t - grades[a].t)
         .map((k) => full[k] || grades[k].card));
   }
   function RatePage(object) {
@@ -222,7 +255,7 @@
     // ponytail: grades saved before genres were kept count as not animated.
     const recsOf = (k) => recs(...k.split('_')).then((r) => (animated(grades[k].card) ? r : r.filter((c) => !animated(c))));
     return Promise.all(seeds.map(recsOf)).then((lists) => {
-      const skip = new Set(Object.keys(grades).concat(watchedCards().map(keyOf)));
+      const skip = new Set(Object.keys(grades).filter(live).concat(watchedCards().map(keyOf)));
       const top = rank(seeds.map((k, i) => [WEIGHT[grades[k].g], lists[i]]), skip).slice(0, 80);
       const because = seeds.map((k, i) => [k, lists[i]]).filter(([k]) => grades[k].g > 0)
         .sort(([a], [b]) => grades[b].g - grades[a].g || grades[b].t - grades[a].t).slice(0, 12)
@@ -297,7 +330,7 @@
     index: 2,
     screen: ['main'],
     call: () => {
-      const results = watchedCards().filter((c) => !grades[keyOf(c)]).slice(0, 40)
+      const results = watchedCards().filter((c) => !gradeOf(c)).slice(0, 40)
         .map((c) => ({ ...c, params: { emit: { onlyEnter: gradeHere(c) } } }));
       if (!results.length) return;
       // total_pages 2: Lampa shows "More" only on rows with more than one page.
