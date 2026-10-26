@@ -3,7 +3,7 @@
 // Loved (+2) and Good (+1) pull in similar films, Bad (-1) pushes them away, OK (0) only marks it watched.
 // Grades live in Lampa's storage on this device (torbox_grades). The main screen gets two rows:
 // "For you" (TMDB recommendations of graded films) and "Rate what you watched" (played past 70%, no grade yet);
-// the left menu gets a "Rate films" page with every played film.
+// the left menu gets a "For you" page (top picks + a row per Loved/Good film) and a "Rate films" page.
 (function () {
   if (window.torbox_en_grades) return;
   const GRADES = [[2, 'Loved', '#21d07a'], [1, 'Good', '#c8d531'], [0, 'OK', '#f0a030'], [-1, 'Bad', '#e8455a']];
@@ -22,8 +22,10 @@
     const o = {};
     ['id', 'title', 'name', 'original_title', 'original_name', 'poster_path', 'backdrop_path', 'release_date',
       'first_air_date', 'vote_average', 'vote_count', 'genre_ids', 'source'].forEach((k) => { if (c[k] != null) o[k] = c[k]; });
+    if (!o.genre_ids && Array.isArray(c.genres)) o.genre_ids = c.genres.map((g) => g.id); // film page cards
     return o;
   }
+  const animated = (c) => (c.genre_ids || []).includes(16);
   function setGrade(card, g) {
     if (g === undefined) delete grades[keyOf(card)];
     else grades[keyOf(card)] = { g, t: Date.now(), card: slim(card) };
@@ -156,9 +158,6 @@
   }
   Lampa.Component.add('torbox_rate', RatePage);
   const openPage = () => Lampa.Activity.push({ url: '', title: 'Rate films', component: 'torbox_rate', page: 1 });
-  const addMenu = () => Lampa.Menu.addButton(ICON, 'Rate films', openPage);
-  if (window.appready) addMenu();
-  else Lampa.Listener.follow('app', (e) => { if (e.type === 'ready') addMenu(); });
 
   // lists: [[weight, [card, ...]], ...] -> cards by summed weight (higher in a list counts more), minus `skip` keys.
   function rank(lists, skip) {
@@ -214,18 +213,79 @@
   }
 
   const WEIGHT = { 2: 2, 1: 1, '-1': -1 };
+  // { top: all seeds ranked together, because: [[grade key, cards], ...] one per Loved/Good film (Loved first,
+  // newest first, 12 max) }, or null with no Loved/Good grade yet.
+  function suggest() {
+    const seeds = Object.keys(grades).filter((k) => WEIGHT[grades[k].g]);
+    if (!seeds.some((k) => grades[k].g > 0)) return Promise.resolve(null);
+    // Animation only from animated films (TMDB adds cartoon spin-offs, e.g. animated Batman for The Dark Knight).
+    // ponytail: grades saved before genres were kept count as not animated.
+    const recsOf = (k) => recs(...k.split('_')).then((r) => (animated(grades[k].card) ? r : r.filter((c) => !animated(c))));
+    return Promise.all(seeds.map(recsOf)).then((lists) => {
+      const skip = new Set(Object.keys(grades).concat(watchedCards().map(keyOf)));
+      const top = rank(seeds.map((k, i) => [WEIGHT[grades[k].g], lists[i]]), skip).slice(0, 80);
+      const because = seeds.map((k, i) => [k, lists[i]]).filter(([k]) => grades[k].g > 0)
+        .sort(([a], [b]) => grades[b].g - grades[a].g || grades[b].t - grades[a].t).slice(0, 12)
+        .map(([k, list]) => [k, rank([[1, list]], skip)]);
+      const all = {};
+      because.reduce((acc, [, l]) => acc.concat(l), top.slice()).forEach((c) => { all[keyOf(c)] = c; });
+      return decent(Object.values(all)).then((ok) => {
+        const keep = new Set(ok.map(keyOf));
+        const f = (l) => l.filter((c) => keep.has(keyOf(c)));
+        return { top: f(top).slice(0, 40), because: because.map(([k, l]) => [k, f(l)]).filter(([, l]) => l.length >= 3) };
+      });
+    });
+  }
+
+  // "For you" page (left menu, or More on the For you row): top picks, then a row per Loved/Good film.
+  function ForYouPage(object) {
+    object.params = { empty: { title: 'Nothing yet', descr: 'Grade a few films you liked on the Rate films page.' } };
+    const comp = Lampa.Maker.make('Main', object);
+    comp.use({
+      onCreate() {
+        suggest().then((s) => {
+          if (!s || !s.top.length) return this.empty();
+          const name = (k) => grades[k].card.title || grades[k].card.name;
+          this.build([{ title: 'Top picks for you', results: s.top }].concat(s.because.map(([k, results]) => ({
+            title: (grades[k].g === 2 ? 'Because you loved ' : 'Because you liked ') + name(k),
+            results,
+          }))));
+        }).catch(() => this.empty());
+      },
+      onInstance(item) {
+        item.use({
+          onInstance(card, data) {
+            card.use({
+              onEnter: () => Lampa.Router.call('full', data),
+              onFocus: () => Lampa.Background.change(Lampa.Utils.cardImgBackground(data)),
+            });
+          },
+        });
+      },
+    });
+    return comp;
+  }
+  Lampa.Component.add('torbox_for_you', ForYouPage);
+  const openForYou = () => Lampa.Activity.push({ url: '', title: 'For you', component: 'torbox_for_you', page: 1 });
+
+  const HEART = '<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M12 21l-1.4-1.3C5.4 15 2 11.9 2 8.1 2 5 4.4 2.6 7.5 2.6c1.7 0 3.4.8 4.5 2.1 1.1-1.3 2.8-2.1 4.5-2.1C19.6 2.6 22 5 22 8.1c0 3.8-3.4 6.9-8.6 11.6z"/></svg>';
+  const addMenu = () => {
+    Lampa.Menu.addButton(HEART, 'For you', openForYou);
+    Lampa.Menu.addButton(ICON, 'Rate films', openPage);
+  };
+  if (window.appready) addMenu();
+  else Lampa.Listener.follow('app', (e) => { if (e.type === 'ready') addMenu(); });
+
   Lampa.ContentRows.add({
     name: 'torbox_for_you',
     title: 'For you',
     index: 1,
     screen: ['main'],
     call: () => {
-      const seeds = Object.keys(grades).filter((k) => WEIGHT[grades[k].g]);
-      if (!seeds.some((k) => grades[k].g > 0)) return;
+      if (!Object.keys(grades).some((k) => grades[k].g > 0)) return;
       return (call) => {
-        Promise.all(seeds.map((k) => recs(...k.split('_')).then((r) => [WEIGHT[grades[k].g], r])))
-          .then((lists) => decent(rank(lists, new Set(Object.keys(grades).concat(watchedCards().map(keyOf)))).slice(0, 80)))
-          .then((results) => call(results.length ? { title: 'For you', results: results.slice(0, 40) } : undefined))
+        suggest()
+          .then((s) => call(s && s.top.length ? { title: 'For you', results: s.top, total_pages: 2, params: { emit: { onlyMore: openForYou } } } : undefined))
           .catch(() => call());
       };
     },
