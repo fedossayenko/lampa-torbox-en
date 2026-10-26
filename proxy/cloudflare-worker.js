@@ -92,6 +92,49 @@ async function mdblist(request, env, type, id) {
   });
 }
 
+// -en fork: film grades shared by every Lampa signed in to the same CUB account + profile (KV GRADES).
+// The client sends its CUB sign-in (X-Cub-Token, X-Cub-Profile); we only ask CUB who it is, never store it.
+// Only accounts listed in the CUB_ACCOUNTS secret may use it, so this worker isn't free storage for others.
+const CUB_DOMAINS = ['cub.best', 'cub.black', 'cubnotrip.top'];
+async function cubUser(request, env) {
+  const token = request.headers.get('X-Cub-Token');
+  const profile = request.headers.get('X-Cub-Profile') || '';
+  if (!token || !/^\d*$/.test(profile)) return null;
+  for (const domain of CUB_DOMAINS) {
+    let json;
+    try {
+      json = await (await fetch(`https://${domain}/api/users/get`, { headers: { token, profile } })).json();
+    } catch {
+      continue; // mirror down, try the next
+    }
+    const id = json && json.user && json.user.id;
+    if (!id || !String(env.CUB_ACCOUNTS || '').split(',').includes(String(id))) return null;
+    return `${id}:${profile}`;
+  }
+  return null;
+}
+
+// POST /grades {"grades": {"movie_603": {g, t, card}, ...}} -> all grades of this account, merged:
+// per film the newer `t` wins; g null = grade removed (kept so the removal reaches other devices).
+async function grades(request, env) {
+  const who = await cubUser(request, env);
+  if (!who) return corsError(request, 'CUB sign-in required.', 401);
+  let mine;
+  try {
+    mine = (await request.json()).grades;
+  } catch {}
+  if (!mine || typeof mine !== 'object' || Array.isArray(mine)) return corsError(request, 'Bad request: "grades" object expected.', 400);
+  const all = (await env.GRADES.get(who, 'json')) || {};
+  let changed = false;
+  for (const [k, v] of Object.entries(mine)) {
+    if (!/^(movie|tv)_\d+$/.test(k) || !v || typeof v.t !== 'number' || (all[k] && all[k].t >= v.t)) continue;
+    all[k] = v;
+    changed = true;
+  }
+  if (changed) await env.GRADES.put(who, JSON.stringify(all)); // KV free tier: 1,000 writes a day
+  return new Response(JSON.stringify(all), { headers: { 'Content-Type': 'application/json', ...corsHeaders(request) } });
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') {
@@ -101,6 +144,8 @@ export default {
     if (!ALLOWED_METHODS.has(request.method)) {
       return corsError(request, 'Method not allowed.', 405);
     }
+
+    if (new URL(request.url).pathname === '/grades' && request.method === 'POST') return grades(request, env);
 
     const scores = new URL(request.url).pathname.match(/^\/mdblist\/(movie|show)(?:\/(\d+))?$/);
     if (scores && (scores[2] || request.method === 'POST')) return mdblist(request, env, scores[1], scores[2]);

@@ -2,3 +2,8 @@ name = "torbox-proxy"
 main = "cloudflare-worker.js"
 compatibility_date = "2026-07-01"
 workers_dev = true
+
+# -en fork: film grades shared between Lampa devices signed in to the same CUB account (see /grades).
+[[kv_namespaces]]
+binding = "GRADES"
+id = "e224f2eb45e84ee49fc9fe6e4521b2cd"
