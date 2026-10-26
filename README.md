@@ -26,6 +26,6 @@ Every film card gets a ★ button: **Loved / Good / OK / Bad**, or "Didn't watch
 The main screen gets two rows (`grades-patch.js`):
 - **Rate what you watched**: films played past 70% (series: any episode) that have no grade yet. OK on a poster opens the grade menu.
 - **Rate films** (left menu, or **More** on that row): a full page of every played film. Unrated ones come first (past 70%, then partly played), graded ones after so you can change them. Films that were only opened are left out. OK on a poster grades it in place: OK, OK = Loved.
-- **For you**: TMDB recommendations of graded films (Loved ×2, Good ×1, Bad −1). Graded and watched films are left out, as are obscure ones (under 200 TMDB votes) and anything below Decent (60) on the verdict.
+- **For you**: TMDB recommendations of graded films (Loved ×2, Good ×1, Bad −1). Graded and watched films are left out, as are obscure ones (under 200 TMDB votes) and anything below Mixed (50) on the verdict (97% of the films graded Good/Loved score 50+).
 - **For you** page (left menu, or **More** on that row): *Top picks for you*, then a *Because you loved / liked …* row for each Loved/Good film (up to 12). Animated films are suggested only from animated films.
 Grades are stored only on the device (`torbox_grades` in Lampa's storage). Lampa's "clear cache" keeps them; a full reset wipes them.
