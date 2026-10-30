@@ -137,7 +137,7 @@ async function grades(request, env) {
 
 // lampa-native (~/IdeaProjects/lampa-native): the stick's home screen in one small response; the TMDB key
 // stays here (secret TMDB_API_KEY: a 32-hex v3 key or a v4 read access token).
-// GET /home -> {"rows": [[title, [[id, "movie"|"tv", name, year, poster_path, backdrop_path, score], ...]], ...]}
+// GET /home -> {"rows": [[title, [[id, "movie"|"tv", name, year, poster_path, score], ...]], ...]}
 // Same rows as Lampa's TMDB home, with Lampa's English row titles; film names in Russian; score = TMDB × 10.
 // Only what a card draws is sent (TMDB's lists are ~10× bigger, see X-Raw-Bytes), and the stick's HTTP cache
 // keeps it for an hour.
@@ -172,7 +172,7 @@ async function home(request, env) {
         const type = m.media_type || path.split('/')[0]; // trending mixes in people: skipped below
         if ((type !== 'movie' && type !== 'tv') || !m.poster_path) continue;
         items.push([m.id, type, m.title || m.name, (m.release_date || m.first_air_date || '').slice(0, 4),
-          m.poster_path, m.backdrop_path || '', Math.round((m.vote_average || 0) * 10)]);
+          m.poster_path, Math.round((m.vote_average || 0) * 10)]);
       }
       return [title, items];
     } catch {
