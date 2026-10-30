@@ -135,6 +135,62 @@ async function grades(request, env) {
   return new Response(JSON.stringify(all), { headers: { 'Content-Type': 'application/json', ...corsHeaders(request) } });
 }
 
+// lampa-native (~/IdeaProjects/lampa-native): the stick's home screen in one small response; the TMDB key
+// stays here (secret TMDB_API_KEY: a 32-hex v3 key or a v4 read access token).
+// GET /home -> {"rows": [[title, [[id, "movie"|"tv", name, year, poster_path, backdrop_path, score], ...]], ...]}
+// Same rows as Lampa's TMDB home, with Lampa's English row titles; film names in Russian; score = TMDB × 10.
+// Only what a card draws is sent (TMDB's lists are ~10× bigger, see X-Raw-Bytes), and the stick's HTTP cache
+// keeps it for an hour.
+const HOME_ROWS = [
+  ['Watching now', 'movie/now_playing'],
+  ['Today in trend', 'trending/all/day'],
+  ['Trending for the week', 'trending/all/week'],
+  ['Watch in cinemas', 'movie/upcoming'],
+  ['Popular films', 'movie/popular'],
+  ['Popular TV shows', 'tv/popular'],
+  ['Top movies', 'movie/top_rated'],
+  ['Top series', 'tv/top_rated'],
+];
+
+function tmdb(env, path) {
+  const key = env.TMDB_API_KEY;
+  const v3 = /^[0-9a-f]{32}$/.test(key);
+  const url = `https://api.themoviedb.org/3/${path}?language=ru-RU${v3 ? `&api_key=${key}` : ''}`;
+  return fetch(url, v3 ? {} : { headers: { Authorization: `Bearer ${key}` } });
+}
+
+async function home(request, env) {
+  let rawBytes = 0;
+  const rows = await Promise.all(HOME_ROWS.map(async ([title, path]) => {
+    try {
+      const res = await tmdb(env, path);
+      if (!res.ok) return null;
+      const text = await res.text();
+      rawBytes += new TextEncoder().encode(text).length;
+      const items = [];
+      for (const m of JSON.parse(text).results || []) {
+        const type = m.media_type || path.split('/')[0]; // trending mixes in people: skipped below
+        if ((type !== 'movie' && type !== 'tv') || !m.poster_path) continue;
+        items.push([m.id, type, m.title || m.name, (m.release_date || m.first_air_date || '').slice(0, 4),
+          m.poster_path, m.backdrop_path || '', Math.round((m.vote_average || 0) * 10)]);
+      }
+      return [title, items];
+    } catch {
+      return null; // one failed row shouldn't blank the whole screen
+    }
+  }));
+  const ok = rows.filter(Boolean);
+  if (!ok.length) return corsError(request, 'TMDB unavailable.', 502);
+  return new Response(JSON.stringify({ rows: ok }), {
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'max-age=3600',
+      'X-Raw-Bytes': String(rawBytes),
+      ...corsHeaders(request),
+    },
+  });
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') {
@@ -146,6 +202,7 @@ export default {
     }
 
     if (new URL(request.url).pathname === '/grades' && request.method === 'POST') return grades(request, env);
+    if (new URL(request.url).pathname === '/home' && request.method === 'GET') return home(request, env);
 
     const scores = new URL(request.url).pathname.match(/^\/mdblist\/(movie|show)(?:\/(\d+))?$/);
     if (scores && (scores[2] || request.method === 'POST')) return mdblist(request, env, scores[1], scores[2]);
