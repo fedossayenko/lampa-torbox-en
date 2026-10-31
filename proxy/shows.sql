@@ -7,5 +7,11 @@ CREATE TABLE IF NOT EXISTS shows (
   original TEXT NOT NULL,
   last TEXT NOT NULL,
   card TEXT NOT NULL,
-  t INTEGER NOT NULL
+  t INTEGER NOT NULL,
+  -- for new episodes (fresh.sql), added 2026-10-31 to the live table with ALTER TABLE shows ADD COLUMN imdb TEXT
+  -- (and seasons TEXT, aired TEXT): the IMDb id (Torrentio's), [[season, episodes, its air date], ...] without
+  -- specials, the last aired episode's air date (YYYY-MM-DD)
+  imdb TEXT,
+  seasons TEXT,
+  aired TEXT
 );
