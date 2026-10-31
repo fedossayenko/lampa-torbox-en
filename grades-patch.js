@@ -65,6 +65,64 @@
   }
   sync();
 
+  // Resume points shared with lampa-native (the stick's native app) through the same worker (/timeline, D1; the
+  // same CUB sign-in check). At start and whenever Lampa comes back on screen: the server's newer points go into
+  // Lampa's timeline, Lampa's newer ones go up (the first time all of them; points from before Lampa stamped them
+  // count as oldest). Lampa's own changes go up as they happen. Per point the newer one wins (updated, ms).
+  const TIMELINE = 'https://torbox-proxy.sayenkofedor.workers.dev/timeline';
+  let pulling = false;
+  function cubHeaders() {
+    const a = Lampa.Storage.get('account', {}) || {};
+    return a.token && a.profile ? { 'X-Cub-Token': a.token, 'X-Cub-Profile': String(a.profile.id) } : null;
+  }
+  function point(hash, r) {
+    const p = { hash, time: r.time || 0, duration: r.duration || 0, percent: r.percent || 0, updated: r.updated || 1 };
+    return r.card ? Object.assign(p, { card: r.card, season: r.season, episode: r.episode }) : p;
+  }
+  function pushTimeline(points) {
+    const h = cubHeaders();
+    if (!h || !points.length) return;
+    fetch(TIMELINE, {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, h),
+      body: JSON.stringify({ timelines: points }),
+    }).catch(() => {});
+  }
+  function pullTimeline() {
+    const h = cubHeaders();
+    if (!h) return;
+    fetch(TIMELINE, { headers: h })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((all) => {
+        if (!all) return;
+        const theirs = all.timelines || {};
+        const mine = Lampa.Storage.get(Lampa.Timeline.filename(), {}) || {};
+        const up = Object.keys(mine).filter((hash) => typeof mine[hash] === 'object' && mine[hash]
+          && (!theirs[hash] || (mine[hash].updated || 1) > theirs[hash].updated)).map((hash) => point(hash, mine[hash]));
+        pulling = true; // Lampa's update event fires for these too: not sent back
+        try {
+          Object.keys(theirs).forEach((hash) => {
+            const l = mine[hash];
+            if (l && typeof l === 'object' && (l.updated || 1) >= theirs[hash].updated) return;
+            Lampa.Timeline.update(Object.assign(point(hash, theirs[hash]), { received: true }));
+          });
+        } finally {
+          pulling = false;
+        }
+        for (let i = 0; i < up.length; i += 2000) pushTimeline(up.slice(i, i + 2000));
+      })
+      .catch(() => {});
+  }
+  if (Lampa.Timeline && Lampa.Timeline.listener) {
+    Lampa.Timeline.listener.follow('update', (e) => {
+      if (!pulling && e && e.data && e.data.road) pushTimeline([point(e.data.hash, e.data.road)]);
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) pullTimeline();
+    });
+    pullTimeline();
+  }
+
   // `more`: extra menu items {title, action} after the grades.
   function ask(card, done, more) {
     const cur = gradeOf(card);
