@@ -96,7 +96,40 @@ test('film page: display-ready strings, the verdict first, then TMDB and the MDB
     imdb: 'tt15239678', // the stick asks /streams with it as soon as the page opens
     episodes: [],
     people: 'Director Denis Villeneuve · Cast Timothée Chalamet, Zendaya, Rebecca Ferguson, Javier Bardem, Josh Brolin, Austin Butler',
+    cast: [], // the photos row: only people with a photo (these have none)
+    collection: '',
+    parts: [],
   });
+});
+
+test('film page: the cast row (12 with photos) and the film\'s collection as Home cards, oldest first', async () => {
+  const people = Array.from({ length: 15 }, (_, i) => ({ name: `Actor ${i}`, character: `Role ${i}`, profile_path: i === 1 ? null : `/a${i}.jpg` }));
+  tmdbAnswers({
+    'movie/7': { title: 'Dune: Part Two', credits: { cast: people, crew: [] }, belongs_to_collection: { id: 726871, name: 'Dune Collection' } },
+    'collection/726871': {
+      name: 'Dune Collection',
+      parts: [
+        { id: 7, title: 'Dune: Part Two', release_date: '2024-02-27', poster_path: '/2.jpg', vote_average: 8.15, backdrop_path: '/b2.jpg' },
+        { id: 3, title: 'Dune: Part Three', release_date: '', poster_path: null, vote_average: 0 }, // not out: no poster
+        { id: 6, title: 'Dune', release_date: '2021-09-15', poster_path: '/1.jpg', vote_average: 7.8, backdrop_path: '/b1.jpg' },
+      ],
+    },
+  });
+  const film = await (await card('movie/7')).json();
+  assert.equal(film.cast.length, 12);
+  assert.deepEqual(film.cast.slice(0, 2), [['Actor 0', 'Role 0', '/a0.jpg'], ['Actor 2', 'Role 2', '/a2.jpg']]);
+  assert.equal(film.collection, 'Dune Collection');
+  assert.deepEqual(film.parts, [
+    [6, 'movie', 'Dune', '2021', '/1.jpg', 78, '/b1.jpg'],
+    [7, 'movie', 'Dune: Part Two', '2024', '/2.jpg', 82, '/b2.jpg'], // this film too: where it sits in the series
+  ]);
+});
+
+test('film page without its collection (TMDB failed) still opens', async () => {
+  tmdbAnswers({ 'movie/7': { title: 'Dune', belongs_to_collection: { id: 1, name: 'Dune Collection' } } });
+  const film = await (await card('movie/7')).json();
+  assert.equal(film.collection, '');
+  assert.deepEqual(film.parts, []);
 });
 
 test('series: original name, seasons with their TMDB scores (no specials, no unrated), creators, MDBList asked as "show"', async () => {
@@ -126,7 +159,8 @@ test('film page without MDBList still opens; fields TMDB leaves out are empty st
   const res = await card('movie/5');
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(),
-    { name: 'Film', original: '', line: '', overview: '', scores: [], seasons: [], imdb: '', episodes: [], people: '' });
+    { name: 'Film', original: '', line: '', overview: '', scores: [], seasons: [], imdb: '', episodes: [], people: '',
+      cast: [], collection: '', parts: [] });
 });
 
 test('film page answers TMDB\'s 404 as 404 and other TMDB failures as 502', async () => {

@@ -159,6 +159,13 @@ function tmdb(env, path, query = '') {
   return fetch(url, v3 ? {} : { headers: { Authorization: `Bearer ${key}` } });
 }
 
+// A Home card: [id, type, name, year, poster_path, score, backdrop_path]. Never null: the stick's org.json turns it
+// into the text "null".
+function cardOf(m, type) {
+  return [m.id, type, m.title || m.name || '', (m.release_date || m.first_air_date || '').slice(0, 4),
+    m.poster_path, Math.round((m.vote_average || 0) * 10), m.backdrop_path || ''];
+}
+
 async function home(request, env) {
   let rawBytes = 0;
   const rows = await Promise.all(HOME_ROWS.map(async ([title, path]) => {
@@ -170,10 +177,7 @@ async function home(request, env) {
       const items = [];
       for (const m of JSON.parse(text).results || []) {
         const type = m.media_type || path.split('/')[0]; // trending mixes in people: skipped below
-        if ((type !== 'movie' && type !== 'tv') || !m.poster_path) continue;
-        // never null: the stick's org.json turns it into the text "null"
-        items.push([m.id, type, m.title || m.name || '', (m.release_date || m.first_air_date || '').slice(0, 4),
-          m.poster_path, Math.round((m.vote_average || 0) * 10), m.backdrop_path || '']);
+        if ((type === 'movie' || type === 'tv') && m.poster_path) items.push(cardOf(m, type));
       }
       return [title, items];
     } catch {
@@ -194,7 +198,9 @@ async function home(request, env) {
 
 // GET /card/movie/<tmdb id> or /card/tv/<tmdb id> -> lampa-native's film page, ready to draw (native.test.js):
 // {name, original, line, overview, scores: [[label, text, 0-100]], seasons: [[label, text, 0-100]], imdb,
-//  episodes: [[season, count]], people}
+//  episodes: [[season, count]], people, cast: [[name, character, profile_path]], collection, parts: [Home card]}
+// cast: the first 12 with a photo. parts: the films of its collection (TMDB, one more call), oldest first, this
+// one included; a film not out yet without a poster is left out.
 // The verdict comes first in scores: the same weighted average as ratings-patch.js (keep the two in step).
 const NORM = { tomatoes: 1, metacritic: 1, rogerebert: 25, imdb: 10, letterboxd: 20, kp: 10, trakt: 1, tmdb: 1, metacriticuser: 10 };
 const WEIGHTS = { tomatoes: 4, metacritic: 3, imdb: 3, kp: 2, rogerebert: 1, trakt: 1, tmdb: 1, metacriticuser: 1, letterboxd: 0.5 };
@@ -230,6 +236,10 @@ async function filmCard(request, env, type, id) {
   const cast = names((m.credits?.cast || []).slice(0, 6));
   const name = m.title || m.name || '';
   const original = m.original_title || m.original_name || '';
+  const set = m.belongs_to_collection;
+  const collection = set ? await tmdb(env, `collection/${set.id}`).then((x) => (x.ok ? x.json() : {})).catch(() => ({})) : {};
+  const parts = (collection.parts || []).filter((p) => p.poster_path)
+    .sort((a, b) => (a.release_date || '9').localeCompare(b.release_date || '9')).map((p) => cardOf(p, 'movie'));
 
   return new Response(JSON.stringify({
     name,
@@ -244,6 +254,10 @@ async function filmCard(request, env, type, id) {
     episodes: type === 'tv' ? (m.seasons || []).filter((s) => s.season_number > 0 && s.episode_count > 0)
       .map((s) => [s.season_number, s.episode_count]) : [],
     people: [makers[1] && `${makers[0]} ${makers[1]}`, cast && `Cast ${cast}`].filter(Boolean).join(' · '),
+    cast: (m.credits?.cast || []).filter((p) => p.profile_path).slice(0, 12)
+      .map((p) => [p.name || '', p.character || '', p.profile_path]),
+    collection: parts.length ? collection.name || '' : '',
+    parts,
   }), {
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
