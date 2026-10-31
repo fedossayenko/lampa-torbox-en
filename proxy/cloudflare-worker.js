@@ -362,7 +362,7 @@ async function filmCard(request, env, type, id) {
 // cached: 1 yes, 0 no, -1 unknown (no TORBOX_API_KEY secret, or TorBox down).
 // POST, the same path: Torrentio's answer in the body, from the stick. Torrentio answers here 429 at times
 // (Cloudflare's IPs are shared and rate-limited) while the stick's home IP gets it: the app then asks Torrentio
-// itself and posts that here (≤ 4 MB).
+// itself and posts that here (≤ 4 MB; the stick's X-Play-Token only: a list spends TorBox checks on any hashes).
 const FIRST = 6;
 const MAX = 100;
 // One badge per group, the first that matches: resolution, Dolby Vision, HDR, REMUX, codec, audio.
@@ -404,6 +404,7 @@ async function cachedOnTorBox(env, hashes) {
 async function sources(request, env, kind, imdb, season, episode) {
   let list;
   if (request.method === 'POST') {
+    if (!sameSecret(request.headers.get('X-Play-Token'), env.PLAY_TOKEN)) return corsError(request, 'Forbidden.', 403);
     const text = await request.text();
     if (text.length > 4e6) return corsError(request, 'Too big.', 413);
     try {

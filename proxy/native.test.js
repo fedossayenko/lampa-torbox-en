@@ -259,13 +259,16 @@ test('sources: each torrent once; Torrentio down → 502', async () => {
 // the app asks Torrentio itself and posts its answer here: the same filtering, sorting and TorBox check.
 test('sources: Torrentio\'s answer posted by the stick is used as Torrentio\'s own, Torrentio not asked', async () => {
   tmdbAnswers({ '/v1/api/torrents/checkcached': { success: true, data: [{ hash: hash(4) }] } });
-  const post = (path, body) => worker.fetch(new Request('https://w/streams/' + path, { method: 'POST', body }), streamsEnv);
+  const post = (path, body, headers = { 'X-Play-Token': 'stick-token' }) => worker.fetch(
+    new Request('https://w/streams/' + path, { method: 'POST', body, headers }), { ...streamsEnv, PLAY_TOKEN: 'stick-token' });
   const body = await (await post('movie/tt1?lang=RU,UA', JSON.stringify(fifteen['/stream/movie/tt1.json']))).json();
   assert.deepEqual(body.streams.map((r) => r[0]), ruUa.slice(0, 6).map(hash));
   assert.deepEqual(body.streams.map((r) => r[8]), [1, 0, 0, 0, 0, 0]);
   assert.ok(!asked.some((u) => u.includes('torrentio')));
   assert.equal((await post('movie/tt1', 'not json')).status, 400);
   assert.equal((await post('movie/tt1', 'x'.repeat(4e6 + 1))).status, 413);
+  // only the stick: a posted list spends the TorBox key's checks on any hashes
+  assert.equal((await post('movie/tt1', '{"streams":[]}', {})).status, 403);
 });
 
 // Badges from Torrentio's quality line, the torrent name and the file name. Real names from Dune: Part Two's list.
