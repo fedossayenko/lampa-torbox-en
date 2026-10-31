@@ -241,6 +241,8 @@ async function filmCard(request, env, type, id) {
   const parts = (collection.parts || []).filter((p) => p.poster_path && p.id !== Number(id))
     .sort((a, b) => (a.release_date || '9').localeCompare(b.release_date || '9')).map((p) => cardOf(p, 'movie'));
 
+  const photos = (m.credits?.cast || []).filter((p) => p.profile_path).slice(0, 12)
+    .map((p) => [p.name || '', p.character || '', p.profile_path]);
   return new Response(JSON.stringify({
     name,
     original: original === name ? '' : original,
@@ -253,9 +255,10 @@ async function filmCard(request, env, type, id) {
     imdb: m.imdb_id || m.external_ids?.imdb_id || '', // for /streams; TV details carry it only in external_ids
     episodes: type === 'tv' ? (m.seasons || []).filter((s) => s.season_number > 0 && s.episode_count > 0)
       .map((s) => [s.season_number, s.episode_count]) : [],
-    people: [makers[1] && `${makers[0]} ${makers[1]}`, cast && `Cast ${cast}`].filter(Boolean).join(' · '),
-    cast: (m.credits?.cast || []).filter((p) => p.profile_path).slice(0, 12)
-      .map((p) => [p.name || '', p.character || '', p.profile_path]),
+    // the cast's names only when no one has a photo: else the photos row names them
+    people: [makers[1] && `${makers[0]} ${makers[1]}`, !photos.length && cast && `Cast ${cast}`].filter(Boolean)
+      .join(' · '),
+    cast: photos,
     collection: parts.length ? collection.name || '' : '',
     parts,
   }), {
