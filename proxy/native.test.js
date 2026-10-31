@@ -382,6 +382,7 @@ function d1() {
   db.exec(readFileSync(new URL('./titles.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./shows.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./marks.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('./segments.sql', import.meta.url), 'utf8'));
   const stmt = (sql, args = []) => ({
     bind: (...a) => stmt(sql, a),
     all: async () => ({ results: db.prepare(sql).all(...args) }),
@@ -821,4 +822,70 @@ test('stream: the next episode\'s first ask marks the one streamed before it wat
   } finally {
     delete globalThis.caches;
   }
+});
+
+// Skip times: IntroDB (IMDb id) and TheIntroDB (TMDB id) merged into DDD's "segments" format, kept in D1.
+// Foundation S1 E9 as both answered on 2026-10-31: they differ on the intro's end (84 s / 58.9 s).
+let keys = []; // the Authorization each was asked with
+function skipAnswers(byHost) {
+  asked = [];
+  keys = [];
+  globalThis.fetch = async (url, init) => {
+    asked.push(String(url));
+    keys.push(new Headers(init?.headers).get('Authorization'));
+    const u = new URL(url);
+    const body = byHost[u.hostname]?.(u.searchParams);
+    return body === undefined ? new Response('down', { status: 500 })
+      : body === null ? new Response('{"error":"Not found"}', { status: 404 }) : new Response(JSON.stringify(body));
+  };
+}
+const foundation = {
+  'api.introdb.app': (q) => (q.get('episode') === '9' ? {
+    intro: { start_ms: 0, end_ms: 84000 }, recap: null, outro: { start_ms: 3390000, end_ms: 3451000 } } : null),
+  'api.theintrodb.org': (q) => (q.get('episode') === '9' ? {
+    intro: [{ start_ms: null, end_ms: 58867 }], credits: [{ start_ms: 3395489, end_ms: null }] } : { intro: [] }),
+};
+const skip = (path, headers = stick) => worker.fetch(new Request(`https://w/segments/${path}`, { headers }), skipEnv);
+let skipEnv;
+
+test('segments: the intro that ends first, the credits that start last; episodes with none left out', async () => {
+  skipEnv = { ...playEnv, DB: d1() };
+  skipAnswers(foundation);
+  const res = await skip('tv/93740/tt0804484?e=1:9,1:10');
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { '1:9': 'intro:0-58867;credits:3395489-' });
+  assert.equal(asked.length, 4);
+  assert.ok(asked.includes('https://api.introdb.app/segments?imdb_id=tt0804484&season=1&episode=9'));
+  assert.ok(asked.includes('https://api.theintrodb.org/v4/media?tmdb_id=93740&season=1&episode=9'));
+  // again: both from D1, the one with none too (a day)
+  skipAnswers({});
+  assert.deepEqual(await (await skip('tv/93740/tt0804484?e=1:9,1:10')).json(), { '1:9': 'intro:0-58867;credits:3395489-' });
+  assert.equal(asked.length, 0);
+});
+
+test('segments: a film under "0:0", a recap, an end before the next scene; not kept while one is down', async () => {
+  skipEnv = { ...playEnv, DB: d1() };
+  skipAnswers({
+    'api.introdb.app': () => ({ intro: null, recap: { start_ms: 95000, end_ms: 259000 },
+      outro: { start_ms: 10452995, end_ms: 10822200 } }),
+  }); // TheIntroDB down
+  assert.deepEqual(await (await skip('movie/872585/tt15398776')).json(),
+    { '0:0': 'recap:95000-259000;credits:10452995-10822200' });
+  assert.equal(asked[0], 'https://api.introdb.app/segments?imdb_id=tt15398776&is_movie=true');
+  assert.equal(asked[1], 'https://api.theintrodb.org/v4/media?tmdb_id=872585');
+  assert.equal(skipEnv.DB.raw.prepare('select count(*) n from segments').get().n, 0); // asked again next time
+  skipAnswers({});
+  assert.deepEqual(await (await skip('tv/1/tt1?e=2:1')).json(), {});
+  assert.equal(skipEnv.DB.raw.prepare('select count(*) n from segments').get().n, 0);
+});
+
+test('segments: the stick only, 6 episodes at most, nonsense ones dropped', async () => {
+  skipEnv = { ...playEnv, DB: d1() };
+  skipAnswers(foundation);
+  assert.equal((await skip('tv/93740/tt0804484?e=1:9', {})).status, 403);
+  skipEnv.THEINTRODB_API_KEY = 'tidb-key';
+  assert.equal(asked.length, 0);
+  await skip('tv/93740/tt0804484?e=1:1,1:2,x,1:3,1:4,1:5,1:6,1:7');
+  assert.equal(asked.length, 12);
+  assert.equal(keys.filter((k) => k === 'Bearer tidb-key').length, 6); // TheIntroDB's, with the key
 });
