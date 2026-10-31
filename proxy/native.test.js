@@ -684,3 +684,76 @@ function lampaHashOf(s) {
 test('Lampa\'s hash: the same keys as Lampa and the app (TimelineTest)', () => {
   assert.equal(lampaHashOf('The Dark Knight'), '13906648'); // TimelineTest's, which matches Lampa's timeline
 });
+
+// Series: DDD gets the episode asked for and the ones after it as a playlist of this worker's /stream addresses.
+const season = {
+  id: 11, hash: H, download_present: true, progress: 1,
+  files: [
+    { id: 5, name: 'Foundation S01/Foundation.S01E10.mkv', short_name: 'Foundation.S01E10.mkv', size: 3e9 },
+    { id: 4, name: 'Foundation S01/Foundation.S01E09.mkv', short_name: 'Foundation.S01E09.mkv', size: 3e9 },
+    { id: 3, name: 'Foundation S01/Foundation.S01E08.mkv', short_name: 'Foundation.S01E08.mkv', size: 3e9 },
+    { id: 7, name: 'Foundation S01/Foundation.S01E10.sample.mkv', short_name: 'Foundation.S01E10.sample.mkv', size: 1e7 },
+    { id: 6, name: 'Foundation S01/Foundation.S02E01.mkv', short_name: 'Foundation.S02E01.mkv', size: 3e9 },
+  ],
+};
+const seasonEnv = () => ({ ...playEnv, DB: d1() });
+const series = (e, q) => worker.fetch(new Request(`https://w/play/${H}?${q}`, { headers: stick }), e).then((r) => r.json());
+
+test('play a series\' episode: DDD\'s playlist from it on, in order, Lampa\'s keys, samples left out', async () => {
+  torbox({ ...ready, 'mylist?id': { success: true, data: season } });
+  const e = seasonEnv();
+  const res = await series(e, 'file=1&name=Foundation.S01E09.mkv&tl=1&series=Foundation');
+  assert.deepEqual(res.playlist.map(([s, ep, key, name]) => [s, ep, key, name]), [
+    [1, 9, lampaHashOf('19Foundation'), 'Foundation.S01E09.mkv'],
+    [1, 10, lampaHashOf('110Foundation'), 'Foundation.S01E10.mkv'],
+    [2, 1, lampaHashOf('21Foundation'), 'Foundation.S02E01.mkv'],
+  ]);
+  assert.equal(res.url, res.playlist[0][4], 'DDD starts on the episode asked for');
+  assert.ok(res.playlist[1][4].startsWith(`https://w/stream/11/5?tl=${lampaHashOf('110Foundation')}&prev=${lampaHashOf('19Foundation')}&sig=`));
+  const again = await series(e, 'file=1&name=Foundation.S01E09.mkv&tl=1&series=Foundation');
+  assert.deepEqual(again.playlist, res.playlist, 'the same addresses every time: DDD keeps its resume point per address');
+  // a film, or no series asked: one link as before
+  assert.equal((await series(e, 'file=1&name=Foundation.S01E09.mkv')).playlist, undefined);
+});
+
+test('stream: TorBox\'s link for an address /play made; any other → 403, TorBox asked nothing', async () => {
+  torbox({ ...ready, 'mylist?id': { success: true, data: season } });
+  const e = seasonEnv();
+  const next = (await series(e, 'name=Foundation.S01E09.mkv&series=Foundation')).playlist[1][4];
+  torbox(ready);
+  const res = await worker.fetch(new Request(next), e);
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('Location'), 'https://store.torbox.app/dl/xyz');
+  assert.ok(asked.some((u) => u.includes('torrent_id=11&file_id=5')));
+  for (const bad of [next.replace('sig=', 'sig=0'), next.replace('/stream/11/5', '/stream/11/6'), next.replace(/tl=\d+/, 'tl=1')]) {
+    torbox(ready);
+    assert.equal((await worker.fetch(new Request(bad), e)).status, 403, bad);
+    assert.deepEqual(asked, []);
+  }
+});
+
+test('stream: the next episode\'s first ask marks the one streamed before it watched; seeks and cold starts don\'t', async () => {
+  const stored = new Map();
+  globalThis.caches = { default: {
+    match: async (req) => stored.get(req.url)?.clone(),
+    put: async (req, res) => { stored.set(req.url, res); },
+  } };
+  try {
+    torbox({ ...ready, 'mylist?id': { success: true, data: season } });
+    const e = seasonEnv();
+    const list = (await series(e, 'name=Foundation.S01E09.mkv&series=Foundation')).playlist;
+    const percent = (key) => e.DB.raw.prepare('SELECT percent FROM timeline WHERE hash = ?').get(key)?.percent;
+    torbox(ready);
+    const ask = (url, range) => worker.fetch(new Request(url, { headers: range ? { Range: range } : {} }), e);
+    await ask(list[0][4]); // S1E9 starts (/play kept its link: no TorBox call)
+    assert.deepEqual(asked, []);
+    await ask(list[2][4], 'bytes=0-'); // S2E1 by hand: S1E10 never streamed
+    assert.equal(percent(list[1][2]), undefined);
+    await ask(list[1][4], 'bytes=5000000-'); // a seek into S1E10 isn't its start
+    assert.equal(percent(list[0][2]), undefined);
+    await ask(list[1][4]); // DDD goes on to S1E10: S1E9 watched
+    assert.equal(percent(list[0][2]), 100);
+  } finally {
+    delete globalThis.caches;
+  }
+});
