@@ -667,6 +667,35 @@ test('mine: films being watched (5 min in) join the series (the timeline, by Lam
   assert.equal(rows[0][1][0][2], 'RU The Matrix', 'TMDB down: the card CUB kept');
 });
 
+test('mine: Rate what you watched = the history played past 70 % (a series: any episode), no grade yet; the grades', async () => {
+  const e = mineEnv();
+  e.GRADES = { get: async (k) => (k === '42:7' ? { movie_603: { g: 2, t: 1 }, movie_9: { g: null, t: 2 },
+    movie_10: { g: 'skip', t: 3 } } : null) };
+  const point = (key, percent) => e.DB.raw.prepare(
+    'INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, 1, 2, ?, 1)').run(lampaHashOf(key), percent);
+  point('The Matrix', 95); // graded
+  point('Gone Girl', 80);
+  point('Ungraded', 75); // its grade removed
+  point('Not mine', 90); // "Didn't watch / not mine"
+  point('Half', 50);
+  point('Thrown', 99); // marks don't matter
+  point('29Foundation', 72);
+  point('11:1Long', 70); // season 11, episode 1: Lampa's key
+  const film = (id, original) => ({ id, title: 'RU ' + original, original_title: original, poster_path: `/${id}.jpg` });
+  cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([
+    bm(1, 'history', 'movie', 1, film(603, 'The Matrix')), bm(2, 'history', 'movie', 2, film(8, 'Gone Girl')),
+    bm(3, 'history', 'movie', 3, film(9, 'Ungraded')), bm(4, 'history', 'movie', 4, film(10, 'Not mine')),
+    bm(5, 'history', 'movie', 5, film(11, 'Half')), bm(6, 'history', 'movie', 6, film(12, 'Thrown')),
+    bm(7, 'thrown', 'movie', 7, film(12, 'Thrown')),
+    bm(8, 'history', 'tv', 8, { id: 93740, name: 'Основание', original_name: 'Foundation', number_of_seasons: 3 }),
+    bm(9, 'history', 'tv', 9, { id: 1399, name: 'Игра престолов', original_name: 'Game of Thrones', number_of_seasons: 8 }),
+    bm(10, 'history', 'tv', 10, { id: 5, name: 'Долгий', original_name: 'Long' }), // no seasons count: 30 scanned
+  ]) });
+  const { rows, grades } = await (await getMine(e)).json();
+  assert.deepEqual(rows.find(([t]) => t === 'Rate what you watched')[1].map((c) => c[0]), [5, 93740, 12, 9, 8]);
+  assert.deepEqual(grades, { movie_603: 2, movie_10: 'skip' }, 'removed ones left out');
+});
+
 test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502; nothing to continue → no row', async () => {
   const e = mineEnv();
   cub({ 'users/get': { user: { id: 9 } } });
@@ -675,7 +704,7 @@ test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502;
   cub({ 'users/get': { user: { id: 42 } } });
   assert.equal((await getMine(e)).status, 502);
   cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]) });
-  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {} });
+  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {} });
 });
 
 test('mine/history: a film played on the stick goes to the front of Lampa\'s history as Lampa\'s card; again: moved', async () => {
