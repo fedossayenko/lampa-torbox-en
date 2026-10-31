@@ -1177,3 +1177,87 @@ test('play ?probe: links that mark nothing watched, and /stream answers them', a
   assert.equal((await worker.fetch(new Request(e10), e)).status, 302);
   assert.equal(e.DB.raw.prepare('SELECT count(*) n FROM timeline').get().n, 0);
 });
+
+// Voice search: the stick's token only; Nova-3 hears the WAV, TMDB checks what was understood.
+const voiceEnv = (ai) => ({ ...env, PLAY_TOKEN: 'stick-token', AI: { calls: [], async run(model, input) { this.calls.push([model, input]); return ai(model, input); } } });
+const voice = (path, body, e, token = 'stick-token') => worker.fetch(new Request(`https://w/voice/${path}`, {
+  method: 'POST', body, headers: { 'X-Play-Token': token, ...(typeof body === 'string' ? { 'Content-Type': 'application/json' } : {}) } }), e);
+
+test('voice/hear: the WAV goes to Nova-3 as it came; the transcript back; no token or no audio → nothing asked', async () => {
+  const e = voiceEnv(() => ({ results: { channels: [{ alternatives: [{ transcript: ' Покажи Интерстеллар. ' }] }] } }));
+  const wav = new Uint8Array(3200);
+  assert.equal((await voice('hear', wav, e, 'wrong')).status, 403);
+  assert.equal((await voice('hear', new Uint8Array(10), e)).status, 413);
+  assert.equal(e.AI.calls.length, 0);
+  const res = await voice('hear', wav, e);
+  assert.deepEqual(await res.json(), { text: 'Покажи Интерстеллар.' });
+  const [model, input] = e.AI.calls[0];
+  assert.equal(model, '@cf/deepgram/nova-3');
+  assert.equal(input.audio.contentType, 'audio/wav');
+  assert.equal((await new Response(input.audio.body).arrayBuffer()).byteLength, 3200);
+});
+
+test('voice/find: Claude\'s guesses checked on TMDB by year (any year when none), confidence 0-100; one sure title opens', async () => {
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    const q = u.searchParams.get('query'), year = u.searchParams.get('year');
+    const films = {
+      Interstellar: [{ id: 157336, title: 'Interstellar', release_date: '2014-11-05', poster_path: '/i.jpg', vote_average: 8.4 }],
+      Interstellar2: [{ id: 1, title: 'Interstellar 2', release_date: '2030-01-01', poster_path: '/x.jpg' }],
+    };
+    if (u.pathname === '/3/search/movie') return Response.json({ results: (year && q === 'Interstellar2') ? [] : films[q] || [] });
+    return new Response('down', { status: 500 });
+  };
+  const e = voiceEnv(() => assert.fail('Claude understood it: no model here'));
+  const ask = (understood) => voice('find', JSON.stringify({ text: 'Покажи Интерстеллар', understood }), e).then((r) => r.json());
+  const one = await ask({ intent: 'title', candidates: [{ title: 'Interstellar', year: 2014, type: 'movie', confidence: 0.97 }] });
+  assert.deepEqual(one, { intent: 'title', by: 'claude', open: true,
+    results: [[157336, 'movie', 'Interstellar', '2014', '/i.jpg', 84, '', 97]] });
+  // found only without its year, 16 years off: half as sure; a guess TMDB doesn't know is left out; two close ones
+  const two = await ask({ intent: 'describe', candidates: [{ title: 'Interstellar', year: 2014, type: 'movie', confidence: 0.6 },
+    { title: 'Interstellar2', year: 2014, type: 'movie', confidence: 0.8 }, { title: 'Nothing', year: 1990, type: 'movie', confidence: 0.9 }] });
+  assert.deepEqual(two.results.map((c) => [c[0], c[7]]), [[157336, 60], [1, 40]]);
+  assert.equal(two.open, false);
+});
+
+test('voice/find: a recommendation = the picks, then TMDB discover by its keywords, genres, years, family (PG); each once', async () => {
+  const discovered = [];
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    if (u.pathname === '/3/search/keyword') return Response.json({ results: [{ id: { robot: 14544, android: 310 }[u.searchParams.get('query')] }] });
+    if (u.pathname === '/3/search/movie') return Response.json({ results: [{ id: 1184918, title: 'The Wild Robot', release_date: '2024-09-12', poster_path: '/w.jpg' }] });
+    if (u.pathname === '/3/discover/movie') {
+      discovered.push(u.searchParams);
+      return Response.json({ results: [{ id: 1184918, title: 'The Wild Robot', release_date: '2024-09-12', poster_path: '/w.jpg' },
+        { id: 2, title: 'Robo', release_date: '2025-01-01', poster_path: '/r.jpg' }, { id: 3, title: 'No poster' }] });
+    }
+    return new Response('down', { status: 500 });
+  };
+  const year = new Date().getUTCFullYear();
+  const e = voiceEnv(() => null);
+  const res = await (await voice('find', JSON.stringify({ text: 'new film about robots for the family', understood: {
+    intent: 'recommend', candidates: [{ title: 'The Wild Robot', year: 2024, type: 'movie', confidence: 0.9 }],
+    discover: { type: 'movie', keywords: ['robot', 'android'], genres: ['Animation', 'Family', 'Nonsense'], from: year - 2, to: year + 3, family: true } } }), e)).json();
+  assert.deepEqual(res.results.map((c) => [c[0], c[7]]), [[1184918, 90], [2, -1]]);
+  assert.equal(res.open, false); // a recommendation never opens by itself
+  const p = discovered[0];
+  assert.equal(p.get('with_keywords'), '14544|310');
+  assert.equal(p.get('with_genres'), '16|10751');
+  assert.equal(p.get('primary_release_date.gte'), `${year - 2}-01-01`);
+  assert.equal(p.get('primary_release_date.lte'), new Date().toISOString().slice(0, 10)); // nothing not out yet
+  assert.equal(p.get('certification.lte'), 'PG');
+  assert.equal(p.get('vote_count.gte'), '20'); // new ones have few votes yet
+});
+
+test('voice/find: no Claude answer → the free model reads the text (the shared prompt, today\'s date); nothing → 502', async () => {
+  globalThis.fetch = async () => Response.json({ results: [{ id: 286217, title: 'The Martian', release_date: '2015-09-30', poster_path: '/m.jpg' }] });
+  const e = voiceEnv(() => ({ response: 'Sure! ```json\n{"intent": "describe", "candidates": [{"title": "The Martian", "year": 2015, "type": "movie", "confidence": 0.99}], "discover": null}\n```' }));
+  const res = await (await voice('find', JSON.stringify({ text: 'фильм где мужик на Марсе выращивает картошку' }), e)).json();
+  assert.deepEqual([res.by, res.open, res.results[0][0], res.results[0][7]], ['workers-ai', true, 286217, 99]);
+  const [model, input] = e.AI.calls[0];
+  assert.equal(model, '@cf/meta/llama-4-scout-17b-16e-instruct');
+  assert.ok(input.messages[0].content.includes(`Today is ${new Date().toISOString().slice(0, 10)}.`));
+  assert.equal(input.messages[1].content, 'фильм где мужик на Марсе выращивает картошку');
+  assert.equal((await voice('find', JSON.stringify({ text: 'hmm' }), voiceEnv(() => ({ response: 'no idea' })))).status, 502);
+  assert.equal((await voice('find', JSON.stringify({ text: 'x' }), e, 'wrong')).status, 403);
+});
