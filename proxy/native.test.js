@@ -102,7 +102,7 @@ test('film page: display-ready strings, the verdict first, then TMDB and the MDB
   });
 });
 
-test('film page: the cast row (12 with photos) and the film\'s collection as Home cards, oldest first', async () => {
+test('film page: the cast row (12 with photos) and the other films of its collection as Home cards, oldest first', async () => {
   const people = Array.from({ length: 15 }, (_, i) => ({ name: `Actor ${i}`, character: `Role ${i}`, profile_path: i === 1 ? null : `/a${i}.jpg` }));
   tmdbAnswers({
     'movie/7': { title: 'Dune: Part Two', credits: { cast: people, crew: [] }, belongs_to_collection: { id: 726871, name: 'Dune Collection' } },
@@ -119,10 +119,18 @@ test('film page: the cast row (12 with photos) and the film\'s collection as Hom
   assert.equal(film.cast.length, 12);
   assert.deepEqual(film.cast.slice(0, 2), [['Actor 0', 'Role 0', '/a0.jpg'], ['Actor 2', 'Role 2', '/a2.jpg']]);
   assert.equal(film.collection, 'Dune Collection');
-  assert.deepEqual(film.parts, [
-    [6, 'movie', 'Dune', '2021', '/1.jpg', 78, '/b1.jpg'],
-    [7, 'movie', 'Dune: Part Two', '2024', '/2.jpg', 82, '/b2.jpg'], // this film too: where it sits in the series
-  ]);
+  // not this film (7): its page doesn't offer itself
+  assert.deepEqual(film.parts, [[6, 'movie', 'Dune', '2021', '/1.jpg', 78, '/b1.jpg']]);
+});
+
+test('a collection with nothing but this film: no collection row', async () => {
+  tmdbAnswers({
+    'movie/7': { title: 'Dune', belongs_to_collection: { id: 1, name: 'Dune Collection' } },
+    'collection/1': { name: 'Dune Collection', parts: [{ id: 7, title: 'Dune', poster_path: '/1.jpg' }] },
+  });
+  const film = await (await card('movie/7')).json();
+  assert.equal(film.collection, '');
+  assert.deepEqual(film.parts, []);
 });
 
 test('film page without its collection (TMDB failed) still opens', async () => {
