@@ -706,7 +706,8 @@ const episodeKey = ([s, e], original) => lampaHash(`${s}${s > 10 ? ':' : ''}${e}
 // [season, episode, Lampa's key, file name, link]: the link is this worker's /stream address of that file, the same
 // every time (DDD keeps its own resume point per address), which gets TorBox's link when DDD asks for it (TorBox's
 // links don't live for a whole night of episodes). 30 at most; none when the file names say no episode.
-// probe (intro-detect.py): links that mark nothing watched (no Lampa key, no previous episode).
+// probe (intro-detect.py): all the torrent's episodes, with links that mark nothing watched (no Lampa key, no
+// previous episode).
 async function episodesFrom(request, env, ctx, torrent, files, file, original, link, probe = false) {
   if (!episodeOf(file.short_name || file.name)) return [];
   const all = files.filter((f) => VIDEO.test(f.name) && !/\bsample\b/i.test(f.name))
@@ -717,7 +718,8 @@ async function episodesFrom(request, env, ctx, torrent, files, file, original, l
   if (from < 0) return [];
   const origin = new URL(request.url).origin;
   await keepLink(ctx, origin, torrent, file.id, link); // DDD's first ask for it costs no TorBox call
-  return Promise.all(all.slice(from, from + 30).map(async (x, i) => {
+  const begin = probe ? 0 : from;
+  return Promise.all(all.slice(begin, begin + 30).map(async (x, i) => {
     const key = probe ? '' : episodeKey(x.at, original);
     const prev = !probe && from + i > 0 ? episodeKey(all[from + i - 1].at, original) : '';
     const sig = await signed(env, `${torrent}/${x.f.id}/${key}/${prev}`);
