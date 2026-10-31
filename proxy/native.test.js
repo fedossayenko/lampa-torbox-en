@@ -648,17 +648,18 @@ test('mine: a series whose last aired episode is watched leaves; Finish later = 
   assert.deepEqual(marks, { tv_93740: 'scheduled' });
 });
 
-test('mine: films being watched join the series (the timeline, by Lampa\'s hash of the original title)', async () => {
+test('mine: films being watched (5 min in) join the series (the timeline, by Lampa\'s hash of the original title)', async () => {
   const e = mineEnv();
   const point = (title, time, percent) => e.DB.raw.prepare(
     'INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, ?, 7000, ?, 1)').run(lampaHashOf(title), time, percent);
   point('The Matrix', 3000, 43);
   point('Finished', 6900, 95);
   point('Opened', 5, 0);
+  point('Tried', 123, 1); // a release's first two minutes: its picture and sound
   const film = (id, original) => ({ id, title: 'RU ' + original, original_title: original, poster_path: `/${id}.jpg` });
   cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([
     bm(1, 'history', 'movie', 1, film(603, 'The Matrix')), bm(2, 'history', 'movie', 2, film(8, 'Finished')),
-    bm(3, 'history', 'movie', 3, film(9, 'Opened')),
+    bm(3, 'history', 'movie', 3, film(9, 'Opened')), bm(4, 'history', 'movie', 4, film(10, 'Tried')),
   ]) });
   const { rows } = await (await getMine(e)).json();
   assert.deepEqual(rows[0][1].map((c) => c[0]), [603]);

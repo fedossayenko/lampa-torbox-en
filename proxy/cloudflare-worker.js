@@ -757,13 +757,15 @@ async function shows(env, ids) {
 // marks for Premium accounts only (error 555 "Нет премиум доступа"), so the app's go to D1 (marks.sql), per account
 // and profile like the grades; a Premium account's own CUB marks count too.
 const MARKS = ['look', 'viewed', 'scheduled', 'continued', 'thrown'];
+const FILM_STARTED_S = 300; // a film in Continue browsing: watched 5 min
 const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 
 // GET /mine with the app's CUB sign-in (X-Cub-Token, X-Cub-Profile; accounts in CUB_ACCOUNTS only, as /grades) ->
 // {"rows": [...] as /home, "marks": {"tv_93740": "scheduled", ...}}: the rows of Lampa's CUB home that are yours,
 // for the top of lampa-native's Home, and every film's mark (the film page's Mark button shows it).
 // Continue browsing: Lampa's (favorite.js continues): the series in the history, newest first, 19 at most; here
-// also the films being watched (10 s in, under 90 %: the timeline), which Lampa's main screen leaves out. Out of it:
+// also the films being watched (5 min in, under 90 %: the timeline; shorter is a try of a release, its sound or a
+// test: user 2026-10-31; their film page still resumes from 10 s), which Lampa's main screen leaves out. Out of it:
 // Viewed, Thrown and Scheduled, and series whose last aired episode is watched. Finish later: the Scheduled ones.
 // Never cached: it changes with every film played.
 // CUB's dump (2026-10-31): {bookmarks: [{id, type, card_id, card_type: movie|tv, time (ms), data: Lampa's card as
@@ -810,7 +812,7 @@ async function mine(request, env) {
   const going = (h) => {
     if (h.type === 'tv') return series.includes(h) && !(points.get(lastKey(h))?.percent >= 90);
     const p = points.get(hash(h.card));
-    return p && p.time > 10 && p.percent < 90;
+    return p && p.time >= FILM_STARTED_S && p.percent < 90;
   };
   const rows = [];
   for (const [title, list] of [['Continue browsing', history.filter(going).slice(0, 19)], ['Finish later', later]]) {
