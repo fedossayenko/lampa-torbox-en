@@ -136,8 +136,8 @@ test('film page answers TMDB\'s 404 as 404 and other TMDB failures as 502', asyn
   assert.equal((await card('tv/1')).status, 502);
 });
 
-// Sources: Torrentio's list filtered by audio language, biggest first; TorBox's cache checked for the first 8 only
-// (what fits on screen), then the rest in a second call.
+// Sources: Torrentio's list filtered by audio language, biggest first; TorBox's cache checked for the first 6 only
+// (5 rows fit on the stick's screen, measured), then the rest in a second call.
 const streamsEnv = { ...env, TORBOX_API_KEY: 'tb-test-key' };
 const hash = (i) => i.toString(16).padStart(40, '0');
 const tio = (i, gb, langs = '🇷🇺 / 🇺🇦') => ({
@@ -152,31 +152,31 @@ const fifteen = { '/stream/movie/tt1.json': { streams: sizes.map((gb, i) => tio(
 const bySize = (ids) => [...ids].sort((a, b) => sizes[b] - sizes[a]);
 const ruUa = bySize([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
 
-test('sources: RU/UA asked → only those, biggest first; the first 8 with TorBox\'s cached mark, checked for those 8 only', async () => {
+test('sources: RU/UA asked → only those, biggest first; the first 6 with TorBox\'s cached mark, checked for those 6 only', async () => {
   tmdbAnswers({ ...fifteen, '/v1/api/torrents/checkcached': { success: true, data: [{ hash: hash(4) }, { hash: hash(8) }] } });
   const res = await streams('movie/tt1?lang=RU,UA');
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('Cache-Control'), 'max-age=600');
   const body = await res.json();
-  assert.deepEqual(body.streams.map((r) => r[0]), ruUa.slice(0, 8).map(hash));
-  assert.equal(body.next, 8); // the rest: from=8
+  assert.deepEqual(body.streams.map((r) => r[0]), ruUa.slice(0, 6).map(hash));
+  assert.equal(body.next, 6); // the rest: from=6
   assert.equal(body.total, 12);
   // every language in the film's list, most releases first: the picker; no flags = English
   assert.deepEqual(body.languages, [['RU', 12], ['UA', 12], ['EN', 2], ['KR', 1]]);
   // [hash, fileIdx, title, badges, size, seeders, tracker, languages, cached: 1 yes / 0 no / -1 unknown]
   assert.deepEqual(body.streams[0], [hash(4), 0, 'Film.4.mkv', ['4K', 'DV', 'HDR'], '60 GB', 96, 'Rutracker', ['RU', 'UA'], 1]);
-  assert.deepEqual(body.streams.map((r) => r[8]), [1, 0, 1, 0, 0, 0, 0, 0]); // 60 GB (#4), 40.5, 33 (#8), … by size
+  assert.deepEqual(body.streams.map((r) => r[8]), [1, 0, 1, 0, 0, 0]); // 60 GB (#4), 40.5, 33 (#8), … by size
   const check = new URL(asked.find((u) => u.includes('checkcached')));
-  assert.deepEqual(check.searchParams.get('hash').split(','), ruUa.slice(0, 8).map(hash));
+  assert.deepEqual(check.searchParams.get('hash').split(','), ruUa.slice(0, 6).map(hash));
   const i = asked.findIndex((u) => u.includes('checkcached'));
   assert.equal(headers[i].get('Authorization'), 'Bearer tb-test-key');
   assert.ok(!asked[i].includes('tb-test-key')); // the key never goes into a URL
 });
 
-test('the rest: from=8 brings the others and says there is no more', async () => {
+test('the rest: from=6 brings the others and says there is no more', async () => {
   tmdbAnswers({ ...fifteen, '/v1/api/torrents/checkcached': { success: true, data: [] } });
-  const body = await (await streams('movie/tt1?lang=RU,UA&from=8')).json();
-  assert.deepEqual(body.streams.map((r) => r[0]), ruUa.slice(8).map(hash));
+  const body = await (await streams('movie/tt1?lang=RU,UA&from=6')).json();
+  assert.deepEqual(body.streams.map((r) => r[0]), ruUa.slice(6).map(hash));
   assert.equal(body.next, 0);
 });
 
@@ -186,7 +186,7 @@ test('languages: no lang = all of them; a language added to RU/UA brings its rel
   tmdbAnswers(fifteen);
   const body = await (await streams('movie/tt1?lang=RU,UA,KR', env)).json();
   assert.equal(body.total, 13);
-  assert.ok(body.streams.some((r) => r[0] === hash(14)) || body.next); // 8 GB: in the first 8 or the rest
+  assert.ok(body.streams.some((r) => r[0] === hash(14)) || body.next); // 8 GB: in the first 6 or the rest
 });
 
 test('series: Torrentio is asked for the one episode; no file name → the first title line; no flags → English', async () => {
@@ -198,10 +198,10 @@ test('series: Torrentio is asked for the one episode; no file name → the first
 
 test('sources without a TorBox key, or with TorBox down, still come: cached unknown (-1)', async () => {
   tmdbAnswers(fifteen); // checkcached answers 500
-  assert.deepEqual((await (await streams('movie/tt1')).json()).streams.map((r) => r[8]), Array(8).fill(-1));
+  assert.deepEqual((await (await streams('movie/tt1')).json()).streams.map((r) => r[8]), Array(6).fill(-1));
   tmdbAnswers(fifteen);
   const body = await (await streams('movie/tt1', env)).json();
-  assert.deepEqual(body.streams.map((r) => r[8]), Array(8).fill(-1));
+  assert.deepEqual(body.streams.map((r) => r[8]), Array(6).fill(-1));
   assert.ok(!asked.some((u) => u.includes('torbox')));
 });
 
