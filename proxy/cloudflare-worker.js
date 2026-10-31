@@ -96,22 +96,29 @@ async function mdblist(request, env, type, id) {
 // The client sends its CUB sign-in (X-Cub-Token, X-Cub-Profile); we only ask CUB who it is, never store it.
 // Only accounts listed in the CUB_ACCOUNTS secret may use it, so this worker isn't free storage for others.
 const CUB_DOMAINS = ['cub.best', 'cub.black', 'cubnotrip.top'];
-async function cubUser(request, env) {
+// CUB's API with the client's sign-in: the first mirror that answers JSON (its errors too: {error, code}), or null.
+// form: a POST as Lampa sends it.
+async function cubApi(request, path, form) {
   const token = request.headers.get('X-Cub-Token');
   const profile = request.headers.get('X-Cub-Profile') || '';
   if (!token || !/^\d*$/.test(profile)) return null;
   for (const domain of CUB_DOMAINS) {
-    let json;
     try {
-      json = await (await fetch(`https://${domain}/api/users/get`, { headers: { token, profile } })).json();
+      return await (await fetch(`https://${domain}/api/${path}`, form
+        ? { method: 'POST', headers: { token, profile }, body: new URLSearchParams(form) }
+        : { headers: { token, profile } })).json();
     } catch {
-      continue; // mirror down, try the next
+      // mirror down, try the next
     }
-    const id = json && json.user && json.user.id;
-    if (!id || !String(env.CUB_ACCOUNTS || '').split(',').includes(String(id))) return null;
-    return `${id}:${profile}`;
   }
   return null;
+}
+
+async function cubUser(request, env) {
+  const json = await cubApi(request, 'users/get');
+  const id = json && json.user && json.user.id;
+  if (!id || !String(env.CUB_ACCOUNTS || '').split(',').includes(String(id))) return null;
+  return `${id}:${request.headers.get('X-Cub-Profile') || ''}`;
 }
 
 // POST /grades {"grades": {"movie_603": {g, t, card}, ...}} -> all grades of this account, merged:
@@ -586,6 +593,100 @@ async function timeline(request, env) {
   return new Response(null, { status: 204, headers: corsHeaders(request) });
 }
 
+// Lampa's Utils.hash: Java's String.hashCode as a positive decimal. Its timeline keys a film by its original title.
+function lampaHash(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
+  return String(Math.abs(h));
+}
+
+// Home cards in English for CUB's cards (CUB keeps Lampa's card as it was shown: Russian names and posters from CUB's
+// own lists): the search index's (titles), else TMDB's en-US, which then go into the index. [type, id] pairs in;
+// a card for each, in order (TMDB failed or more than `fetchMax` missing: the card CUB kept).
+async function englishCards(env, wanted, fallback, fetchMax = 20) {
+  const pairs = JSON.stringify(wanted.map(([type, id]) => ({ type, id })));
+  const known = new Map(env.DB ? (await env.DB.prepare(`SELECT t.type, t.id, t.card FROM titles t
+      JOIN json_each(?) j ON t.type = j.value->>'type' AND t.id = j.value->>'id'`).bind(pairs).all()
+    .then((r) => r.results).catch(() => [])).map((r) => [`${r.type}:${r.id}`, JSON.parse(r.card)]) : []);
+  const missing = wanted.filter(([type, id]) => !known.has(`${type}:${id}`)).slice(0, fetchMax);
+  const fetched = (await Promise.all(missing.map(([type, id]) => tmdb(env, `${type}/${id}`)
+    .then((res) => (res.ok ? res.json() : null)).then((m) => (m && m.poster_path ? { type, m } : null))
+    .catch(() => null)))).filter(Boolean);
+  for (const { type, m } of fetched) known.set(`${type}:${m.id}`, cardOf(m, type));
+  if (fetched.length && env.DB) {
+    await env.DB.prepare(`INSERT INTO titles (type, id, card, votes, seen, en)
+        SELECT value->>'type', value->>'id', value->>'card', value->>'votes', ?2, value->>'en' FROM json_each(?1) WHERE true
+        ON CONFLICT (type, id) DO NOTHING`)
+      .bind(JSON.stringify(fetched.map(({ type, m }) => ({ type, id: m.id, card: JSON.stringify(cardOf(m, type)),
+        votes: m.vote_count || 0, en: words(`${m.title || m.name} ${m.original_title || m.original_name || ''}`) }))),
+      Date.now()).run().catch(() => {}); // next time from TMDB again
+  }
+  return wanted.map(([type, id], i) => known.get(`${type}:${id}`) || fallback[i]);
+}
+
+// GET /mine with the app's CUB sign-in (X-Cub-Token, X-Cub-Profile; accounts in CUB_ACCOUNTS only, as /grades) ->
+// {"rows": [...]} as /home: the rows of Lampa's CUB home that are yours, for the top of lampa-native's Home.
+// Continue browsing: Lampa's (favorite.js continues): the series in the history, newest first, but those marked
+// Viewed or Thrown, 19 at most; here also the films being watched (10 s in, under 90 %: the timeline), which Lampa's
+// main screen leaves out. Never cached: it changes with every film played.
+// CUB's dump (2026-10-31): {bookmarks: [{id, type, card_id, card_type: movie|tv, time (ms), data: Lampa's card as
+// JSON text, …}]}, oldest first: ~320 KB for 365 history entries. Only the newest 100 cards are parsed (the free
+// plan's 10 ms of CPU a request; Lampa keeps 100 in its own history).
+async function mine(request, env) {
+  if (!(await cubUser(request, env))) return corsError(request, 'CUB sign-in required.', 401);
+  const dump = await cubApi(request, 'bookmarks/dump');
+  if (!dump || !Array.isArray(dump.bookmarks)) return corsError(request, 'CUB unavailable.', 502);
+  const of = (type) => dump.bookmarks.filter((b) => b.type === type);
+  const out = new Set([...of('viewed'), ...of('thrown')].map((b) => String(b.card_id)));
+  const history = of('history').filter((b) => !out.has(String(b.card_id)) && /^(movie|tv)$/.test(b.card_type))
+    .sort((a, b) => (Number(b.time) || 0) - (Number(a.time) || 0)).slice(0, 100) // newest first
+    .map((b) => {
+      try {
+        return { type: b.card_type, card: typeof b.data === 'string' ? JSON.parse(b.data) : b.data };
+      } catch {
+        return null;
+      }
+    }).filter((h) => h && h.card && h.card.id && (!h.card.source || /^(tmdb|cub)$/i.test(h.card.source))); // others: no TMDB id
+  const hash = (c) => lampaHash(c.original_title || c.title || '');
+  const films = history.filter((h) => h.type === 'movie');
+  const points = new Map(films.length && env.DB ? (await env.DB.prepare(
+    'SELECT hash, time, percent FROM timeline WHERE hash IN (SELECT value FROM json_each(?))')
+    .bind(JSON.stringify(films.map((h) => hash(h.card)))).all()
+    .then((r) => r.results).catch(() => [])).map((p) => [p.hash, p]) : []);
+  const watching = (c) => {
+    const p = points.get(hash(c));
+    return p && p.time > 10 && p.percent < 90;
+  };
+  const shown = history.filter((h) => h.type === 'tv' || watching(h.card)).slice(0, 19);
+  const cards = await englishCards(env, shown.map((h) => [h.type, Number(h.card.id)]),
+    shown.map((h) => cardOf(h.card, h.type)));
+  return new Response(JSON.stringify({ rows: cards.length ? [['Continue browsing', cards]] : [] }), {
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(request) },
+  });
+}
+
+// POST /mine/history/movie/<tmdb id> or /mine/history/tv/<tmdb id> (the same sign-in) -> 204: a film played here
+// goes to the front of Lampa's history, as Lampa puts one there when its torrents open (torrent.js): Lampa's
+// recommendations and Continue browsing come from it. The card as Lampa keeps one (Utils.clearCard's fields, TMDB
+// en-US); one already there is moved (its bookmark id, as Lampa sends it).
+const LAMPA_FIELDS = ['poster_path', 'overview', 'release_date', 'id', 'original_title', 'original_language', 'title',
+  'backdrop_path', 'popularity', 'vote_count', 'vote_average', 'imdb_id', 'original_name', 'name', 'first_air_date',
+  'origin_country', 'status', 'number_of_seasons', 'number_of_episodes'];
+async function addHistory(request, env, type, id) {
+  if (!(await cubUser(request, env))) return corsError(request, 'CUB sign-in required.', 401);
+  const [res, dump] = await Promise.all([tmdb(env, `${type}/${id}`), cubApi(request, 'bookmarks/dump')]);
+  if (!res.ok || !dump || !Array.isArray(dump.bookmarks)) return corsError(request, 'TMDB or CUB unavailable.', 502);
+  const m = await res.json();
+  const card = { source: 'tmdb', genre_ids: (m.genres || []).map((g) => g.id) };
+  for (const k of LAMPA_FIELDS) if (m[k] != null) card[k] = m[k];
+  if (card.poster_path) card.img = `https://image.tmdb.org/t/p/w300${card.poster_path}`;
+  const there = dump.bookmarks.find((b) => b.type === 'history' && String(b.card_id) === String(id));
+  const json = await cubApi(request, 'bookmarks/add',
+    { type: 'history', data: JSON.stringify(card), card_id: String(id), id: String(there ? there.id : 0) });
+  if (!json || json.error) return corsError(request, `CUB refused it${json ? ` (${json.code})` : ''}.`, 502);
+  return new Response(null, { status: 204, headers: corsHeaders(request) });
+}
+
 export default {
   scheduled(event, env) {
     return TITLE_CRONS[event.cron] && env.DB ? refreshTitles(env, TITLE_CRONS[event.cron]) : undefined;
@@ -615,6 +716,9 @@ export default {
     const link = new URL(request.url).pathname.match(/^\/play\/([0-9a-f]{40})$/);
     if (link && request.method === 'GET') return play(request, env, link[1]);
     if (new URL(request.url).pathname === '/timeline') return timeline(request, env);
+    if (new URL(request.url).pathname === '/mine' && request.method === 'GET') return mine(request, env);
+    const played = new URL(request.url).pathname.match(/^\/mine\/history\/(movie|tv)\/(\d+)$/);
+    if (played && request.method === 'POST') return addHistory(request, env, played[1], played[2]);
 
     const scores = new URL(request.url).pathname.match(/^\/mdblist\/(movie|show)(?:\/(\d+))?$/);
     if (scores && (scores[2] || request.method === 'POST')) return mdblist(request, env, scores[1], scores[2]);

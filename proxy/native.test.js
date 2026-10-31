@@ -571,3 +571,116 @@ test('film page: kept at the edge a day, so the stick may ask for it ahead (one 
     delete globalThis.caches;
   }
 });
+
+// /mine: Lampa's CUB rows that are yours, from the CUB account the app signed in to. CUB and TMDB answer by path.
+const cubDump = (bookmarks) => ({ secuses: true, version: 9, bookmarks });
+const bm = (id, type, card_type, time, card) => ({ id, type, card_id: String(card.id), card_type, time, data: JSON.stringify(card) });
+function cub(answers) {
+  asked = [];
+  globalThis.fetch = async (url, init) => {
+    const u = new URL(url);
+    asked.push(u.hostname + u.pathname + (init?.body ? ' ' + String(init.body) : ''));
+    const body = answers[u.pathname.replace(/^\/(3|api)\//, '')];
+    return body ? new Response(JSON.stringify(body)) : new Response('{"error":true,"code":500}', { status: 500 });
+  };
+}
+const mineEnv = () => ({ ...env, DB: d1(), CUB_ACCOUNTS: '42' });
+const getMine = (e, h = lampa) => worker.fetch(new Request('https://w/mine', { headers: h }), e);
+
+test('mine: Continue browsing = the history\'s series, newest first, minus Viewed and Thrown, in English', async () => {
+  const e = mineEnv();
+  e.DB.raw.prepare("INSERT INTO titles (type, id, card, votes, seen, en) VALUES ('tv', 1399, ?, 1, 1, ' game of thrones ')")
+    .run(JSON.stringify([1399, 'tv', 'Game of Thrones', '2011', '/got-en.jpg', 85, '/b.jpg']));
+  cub({
+    'users/get': { user: { id: 42 } },
+    'bookmarks/dump': cubDump([
+      bm(1, 'history', 'tv', 100, { id: 1399, name: 'Игра престолов', poster_path: '/got-ru.jpg', source: 'tmdb' }),
+      bm(2, 'history', 'tv', 300, { id: 83867, name: 'Андор', poster_path: '/andor-ru.jpg', source: 'cub' }),
+      bm(3, 'history', 'tv', 200, { id: 5, name: 'Брошенный', source: 'tmdb' }),
+      bm(4, 'thrown', 'tv', 210, { id: 5, name: 'Брошенный' }),
+      bm(5, 'history', 'movie', 400, { id: 603, title: 'Матрица', original_title: 'The Matrix' }),
+      bm(6, 'history', 'tv', 500, { id: 77, name: 'KP only', source: 'kp' }),
+      bm(7, 'book', 'tv', 600, { id: 66, name: 'A bookmark' }),
+    ]),
+    'tv/83867': { id: 83867, name: 'Andor', first_air_date: '2022-09-21', poster_path: '/andor-en.jpg', vote_average: 8.4 },
+  });
+  const res = await getMine(e);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('Cache-Control'), 'no-store');
+  assert.deepEqual((await res.json()).rows, [['Continue browsing', [
+    [83867, 'tv', 'Andor', '2022', '/andor-en.jpg', 84, ''], // TMDB's English card: not in the index yet
+    [1399, 'tv', 'Game of Thrones', '2011', '/got-en.jpg', 85, '/b.jpg'], // the index's
+  ]]]);
+  assert.ok(!asked.some((u) => u.includes('tv/1399')), 'a card in the index costs no TMDB call');
+  assert.ok(asked.every((u) => !u.includes('themoviedb') || u.includes('language=en-US') || !u.includes('?')));
+  cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]) });
+  await getMine(e);
+  assert.equal(e.DB.raw.prepare("SELECT count(*) n FROM titles WHERE id = 83867").get().n, 1, 'kept in the index');
+});
+
+test('mine: films being watched join the series (the timeline, by Lampa\'s hash of the original title)', async () => {
+  const e = mineEnv();
+  const point = (title, time, percent) => e.DB.raw.prepare(
+    'INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, ?, 7000, ?, 1)').run(lampaHashOf(title), time, percent);
+  point('The Matrix', 3000, 43);
+  point('Finished', 6900, 95);
+  point('Opened', 5, 0);
+  const film = (id, original) => ({ id, title: 'RU ' + original, original_title: original, poster_path: `/${id}.jpg` });
+  cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([
+    bm(1, 'history', 'movie', 1, film(603, 'The Matrix')), bm(2, 'history', 'movie', 2, film(8, 'Finished')),
+    bm(3, 'history', 'movie', 3, film(9, 'Opened')),
+  ]) });
+  const { rows } = await (await getMine(e)).json();
+  assert.deepEqual(rows[0][1].map((c) => c[0]), [603]);
+  assert.equal(rows[0][1][0][2], 'RU The Matrix', 'TMDB down: the card CUB kept');
+});
+
+test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502; nothing to continue → no row', async () => {
+  const e = mineEnv();
+  cub({ 'users/get': { user: { id: 9 } } });
+  assert.equal((await getMine(e)).status, 401);
+  assert.equal((await getMine(e, {})).status, 401);
+  cub({ 'users/get': { user: { id: 42 } } });
+  assert.equal((await getMine(e)).status, 502);
+  cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]) });
+  assert.deepEqual(await (await getMine(e)).json(), { rows: [] });
+});
+
+test('mine/history: a film played on the stick goes to the front of Lampa\'s history as Lampa\'s card; again: moved', async () => {
+  const e = mineEnv();
+  const answers = {
+    'users/get': { user: { id: 42 } },
+    'bookmarks/dump': cubDump([bm(34634269, 'history', 'movie', 1, { id: 603, title: 'Матрица' })]),
+    'bookmarks/add': { secuses: true },
+    'movie/603': { id: 603, title: 'The Matrix', original_title: 'The Matrix', poster_path: '/m.jpg', genres: [{ id: 28 }],
+      release_date: '1999-03-30', vote_average: 8.2, credits: { cast: [] }, homepage: 'x' },
+    'tv/1399': { id: 1399, name: 'Game of Thrones', first_air_date: '2011-04-17', number_of_seasons: 8, genres: [] },
+  };
+  cub(answers);
+  const post = (path) => worker.fetch(new Request('https://w/mine/history/' + path, { method: 'POST', headers: lampa }), e);
+  assert.equal((await post('movie/603')).status, 204);
+  const sent = new URLSearchParams(asked.find((u) => u.includes('bookmarks/add')).split(' ')[1]);
+  assert.equal(sent.get('type'), 'history');
+  assert.equal(sent.get('card_id'), '603');
+  assert.equal(sent.get('id'), '34634269', 'already there: Lampa sends its bookmark id');
+  assert.deepEqual(JSON.parse(sent.get('data')), { source: 'tmdb', genre_ids: [28], id: 603, title: 'The Matrix',
+    original_title: 'The Matrix', poster_path: '/m.jpg', release_date: '1999-03-30', vote_average: 8.2,
+    img: 'https://image.tmdb.org/t/p/w300/m.jpg' });
+  cub(answers);
+  assert.equal((await post('tv/1399')).status, 204);
+  assert.equal(new URLSearchParams(asked.find((u) => u.includes('bookmarks/add')).split(' ')[1]).get('id'), '0');
+  cub({ ...answers, 'bookmarks/add': undefined });
+  assert.equal((await post('tv/1399')).status, 502, 'CUB refused');
+  cub({ 'users/get': { user: { id: 9 } } });
+  assert.equal((await post('tv/1399')).status, 401);
+});
+
+// Lampa's Utils.hash, as the app's Timeline.key: Java's String.hashCode, positive.
+function lampaHashOf(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
+  return String(Math.abs(h));
+}
+test('Lampa\'s hash: the same keys as Lampa and the app (TimelineTest)', () => {
+  assert.equal(lampaHashOf('The Dark Knight'), '13906648'); // TimelineTest's, which matches Lampa's timeline
+});
