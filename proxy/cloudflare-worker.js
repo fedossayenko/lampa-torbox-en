@@ -193,7 +193,8 @@ async function home(request, env) {
 }
 
 // GET /card/movie/<tmdb id> or /card/tv/<tmdb id> -> lampa-native's film page, ready to draw (native.test.js):
-// {name, original, line, overview, scores: [[label, text, 0-100]], seasons: [[label, text, 0-100]], people}
+// {name, original, line, overview, scores: [[label, text, 0-100]], seasons: [[label, text, 0-100]], imdb,
+//  episodes: [[season, count]], people}
 // The verdict comes first in scores: the same weighted average as ratings-patch.js (keep the two in step).
 const NORM = { tomatoes: 1, metacritic: 1, rogerebert: 25, imdb: 10, letterboxd: 20, kp: 10, trakt: 1, tmdb: 1, metacriticuser: 10 };
 const WEIGHTS = { tomatoes: 4, metacritic: 3, imdb: 3, kp: 2, rogerebert: 1, trakt: 1, tmdb: 1, metacriticuser: 1, letterboxd: 0.5 };
@@ -204,7 +205,7 @@ const SHOW = [['imdb', 'IMDb', (v) => v.toFixed(1)], ['tomatoes', 'RT', (v) => v
 async function filmCard(request, env, type, id) {
   const mdbType = type === 'tv' ? 'show' : 'movie';
   const [res, r] = await Promise.all([
-    tmdb(env, `${type}/${id}`, '&append_to_response=credits'),
+    tmdb(env, `${type}/${id}`, '&append_to_response=credits,external_ids'),
     fetch(`https://api.mdblist.com/tmdb/${mdbType}/${id}?apikey=${env.MDBLIST_API_KEY}`)
       .then((x) => (x.ok ? x.json() : {})).then(ratingsOf).catch(() => ({})), // no scores beats no page
   ]);
@@ -239,11 +240,112 @@ async function filmCard(request, env, type, id) {
     scores,
     seasons: (m.seasons || []).filter((s) => s.season_number > 0 && s.vote_average > 0)
       .map((s) => [`S${s.season_number}`, s.vote_average.toFixed(1), Math.round(s.vote_average * 10)]),
+    imdb: m.imdb_id || m.external_ids?.imdb_id || '', // for /streams; TV details carry it only in external_ids
+    episodes: type === 'tv' ? (m.seasons || []).filter((s) => s.season_number > 0 && s.episode_count > 0)
+      .map((s) => [s.season_number, s.episode_count]) : [],
     people: [makers[1] && `${makers[0]} ${makers[1]}`, cast && `Cast ${cast}`].filter(Boolean).join(' · '),
   }), {
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'max-age=86400', // a day: MDBList allows 1,000 lookups a day
+      ...corsHeaders(request),
+    },
+  });
+}
+
+// GET /streams/movie/<imdb id> or /streams/series/<imdb id>/<season>/<episode>[?lang=RU,UA][&from=8] -> lampa-native's
+// sources: {streams: [[hash, fileIdx, title, badges, size, seeders, tracker, languages, cached]], next, total,
+// languages: [[code, releases]]}. Torrentio's list (Cloudflare caches it: 3-8 ms from here), each torrent once,
+// only the asked audio languages (none = all), biggest first. TorBox's cache is checked for the first FIRST only
+// (what fits on the screen) so they come fast; the app asks from=FIRST for the rest right after.
+// cached: 1 yes, 0 no, -1 unknown (no TORBOX_API_KEY secret, or TorBox down).
+const FIRST = 8;
+const MAX = 100;
+// One badge per group, the first that matches: resolution, Dolby Vision, HDR, REMUX, codec, audio.
+const BADGES = [
+  [['4K', /\b(2160p|4k|uhd)\b/i], ['1080p', /\b1080p\b/i], ['720p', /\b720p\b/i]],
+  [['DV', /\b(dv|dovi|dolby[ .]?vision)\b/i]],
+  [['HDR10+', /hdr10(\+|plus)/i], ['HDR', /\bhdr(10)?\b/i]],
+  [['REMUX', /remux/i]],
+  [['HEVC', /\b(hevc|[xh]\.?265)\b/i], ['AV1', /\bav1\b/i]],
+  [['Atmos', /atmos/i]],
+  [['TrueHD', /truehd/i]],
+  [['DTS', /\bdts/i]],
+  [['DD+', /\b(ddp|dd\+|e-?ac-?3)/i], ['DD', /\b(ac-?3|dd[ .]?[257]\.[01])\b/i]],
+];
+const UNIT = { K: 1e3, M: 1e6, G: 1e9, T: 1e12 };
+
+// Torrentio marks audio languages with country flags (🇬🇧 for English); no flags = an English release.
+function languagesOf(line) {
+  const codes = new Set();
+  for (const [, a, b] of line.matchAll(/([\u{1F1E6}-\u{1F1FF}])([\u{1F1E6}-\u{1F1FF}])/gu)) {
+    const code = String.fromCharCode(a.codePointAt(0) - 0x1f1a5, b.codePointAt(0) - 0x1f1a5);
+    codes.add(code === 'GB' ? 'EN' : code);
+  }
+  return codes.size ? [...codes] : ['EN'];
+}
+
+async function cachedOnTorBox(env, hashes) {
+  if (!env.TORBOX_API_KEY || !hashes.length) return null;
+  try {
+    const res = await fetch(`https://${TORBOX_HOST}/v1/api/torrents/checkcached?hash=${hashes.join(',')}` +
+      '&format=list&list_files=false', { headers: { Authorization: `Bearer ${env.TORBOX_API_KEY}` } }); // not in the URL
+    if (!res.ok) return null;
+    return new Set(((await res.json()).data || []).map((t) => String(t.hash).toLowerCase()));
+  } catch {
+    return null;
+  }
+}
+
+async function sources(request, env, kind, imdb, season, episode) {
+  let list;
+  try {
+    const id = kind === 'series' ? `${imdb}:${season}:${episode}` : imdb;
+    const res = await fetch(`https://torrentio.strem.fun/stream/${kind}/${id}.json`);
+    if (!res.ok) throw new Error(String(res.status));
+    list = (await res.json()).streams || [];
+  } catch {
+    return corsError(request, 'Torrentio unavailable.', 502);
+  }
+  const seen = new Set();
+  const all = [];
+  for (const st of list) {
+    const hash = String(st.infoHash || '').toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(hash) || seen.has(hash)) continue;
+    seen.add(hash);
+    // title: "<torrent name>\n[<file in it>\n]👤 <seeders> 💾 <size> ⚙️ <tracker>[\n<language flags>]"
+    const lines = String(st.title || '').split('\n');
+    const at = lines.findIndex((l) => l.includes('👤'));
+    const stats = at >= 0 ? lines[at] : '';
+    const size = (stats.match(/💾\s*([\d.]+\s*[KMGT]B)/) || [])[1] || '';
+    const filename = st.behaviorHints?.filename;
+    const text = `${st.name || ''} ${lines[0]} ${filename || ''}`;
+    const badges = BADGES.map((group) => group.find(([, re]) => re.test(text))?.[0]).filter(Boolean);
+    all.push({
+      bytes: parseFloat(size) * (UNIT[(size.match(/([KMGT])B/) || [])[1]] || 0) || 0,
+      row: [hash, st.fileIdx ?? -1, filename || lines[0], badges, size, Number((stats.match(/👤\s*(\d+)/) || [])[1]) || 0,
+        ((stats.match(/⚙️\s*(.+)/) || [])[1] || '').trim(), languagesOf((at >= 0 && lines[at + 1]) || '')],
+    });
+  }
+  const languages = new Map();
+  for (const { row } of all) for (const code of row[7]) languages.set(code, (languages.get(code) || 0) + 1);
+  const params = new URL(request.url).searchParams;
+  const wanted = new Set((params.get('lang') || '').split(',').filter(Boolean));
+  const shown = all.filter(({ row }) => !wanted.size || row[7].some((code) => wanted.has(code)))
+    .sort((a, b) => b.bytes - a.bytes).slice(0, MAX); // stable: equal sizes keep Torrentio's order
+  const from = Number(params.get('from')) || 0;
+  const batch = shown.slice(from, from ? MAX : FIRST).map(({ row }) => row);
+  const cached = await cachedOnTorBox(env, batch.map(([hash]) => hash));
+  for (const row of batch) row.push(cached ? Number(cached.has(row[0])) : -1);
+  return new Response(JSON.stringify({
+    streams: batch,
+    next: !from && shown.length > FIRST ? FIRST : 0,
+    total: shown.length,
+    languages: [...languages].sort((a, b) => b[1] - a[1]),
+  }), {
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'max-age=600', // what TorBox has cached changes slowly
       ...corsHeaders(request),
     },
   });
@@ -263,6 +365,10 @@ export default {
     if (new URL(request.url).pathname === '/home' && request.method === 'GET') return home(request, env);
     const film = new URL(request.url).pathname.match(/^\/card\/(movie|tv)\/(\d+)$/);
     if (film && request.method === 'GET') return filmCard(request, env, film[1], film[2]);
+    const src = new URL(request.url).pathname.match(/^\/streams\/(movie|series)\/(tt\d+)(?:\/(\d+)\/(\d+))?$/);
+    if (src && request.method === 'GET' && (src[1] === 'series') === Boolean(src[3])) {
+      return sources(request, env, src[1], src[2], src[3], src[4]);
+    }
 
     const scores = new URL(request.url).pathname.match(/^\/mdblist\/(movie|show)(?:\/(\d+))?$/);
     if (scores && (scores[2] || request.method === 'POST')) return mdblist(request, env, scores[1], scores[2]);
