@@ -13,5 +13,9 @@ CREATE TABLE IF NOT EXISTS shows (
   -- specials, the last aired episode's air date (YYYY-MM-DD)
   imdb TEXT,
   seasons TEXT,
-  aired TEXT
+  aired TEXT,
+  -- when to ask TMDB again (showStale), added 2026-10-31 likewise: TMDB's status (Ended, Canceled, Returning
+  -- Series...) and the next episode's air date
+  status TEXT,
+  next_air TEXT
 );
