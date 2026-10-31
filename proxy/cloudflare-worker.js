@@ -253,13 +253,13 @@ async function filmCard(request, env, type, id) {
   });
 }
 
-// GET /streams/movie/<imdb id> or /streams/series/<imdb id>/<season>/<episode>[?lang=RU,UA][&from=8] -> lampa-native's
+// GET /streams/movie/<imdb id> or /streams/series/<imdb id>/<season>/<episode>[?lang=RU,UA][&from=6] -> lampa-native's
 // sources: {streams: [[hash, fileIdx, title, badges, size, seeders, tracker, languages, cached]], next, total,
 // languages: [[code, releases]]}. Torrentio's list (Cloudflare caches it: 3-8 ms from here), each torrent once,
 // only the asked audio languages (none = all), biggest first. TorBox's cache is checked for the first FIRST only
-// (what fits on the screen) so they come fast; the app asks from=FIRST for the rest right after.
+// (5 rows fit on the stick's screen, measured; +1 half seen) so they come fast; the app asks from=FIRST for the rest.
 // cached: 1 yes, 0 no, -1 unknown (no TORBOX_API_KEY secret, or TorBox down).
-const FIRST = 8;
+const FIRST = 6;
 const MAX = 100;
 // One badge per group, the first that matches: resolution, Dolby Vision, HDR, REMUX, codec, audio.
 const BADGES = [
