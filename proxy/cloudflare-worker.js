@@ -909,12 +909,14 @@ const FILM_STARTED_S = 300; // a film in Continue browsing: watched 5 min
 const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 
 // GET /mine with the app's CUB sign-in (X-Cub-Token, X-Cub-Profile; accounts in CUB_ACCOUNTS only, as /grades) ->
-// {"rows": [...] as /home, "marks": {"tv_93740": "scheduled", ...}}: the rows of Lampa's CUB home that are yours,
-// for the top of lampa-native's Home, and every film's mark (the film page's Mark button shows it).
+// {"rows": [...] as /home, "marks": {"tv_93740": "scheduled", ...}, "grades": {"movie_603": 2, ...}}: the rows of
+// Lampa's CUB home that are yours, for the top of lampa-native's Home, and every film's mark and grade (the film
+// page's ⋯ and ★ show them; grades: KV GRADES as /grades, "skip" = Didn't watch / not mine).
 // Continue browsing: Lampa's (favorite.js continues): the series in the history, newest first, 19 at most; here
 // also the films being watched (5 min in, under 90 %: the timeline; shorter is a try of a release, its sound or a
 // test: user 2026-10-31; their film page still resumes from 10 s), which Lampa's main screen leaves out. Out of it:
 // Viewed, Thrown and Scheduled, and series whose last aired episode is watched. Finish later: the Scheduled ones.
+// Rate what you watched (grades-patch.js's row): the history played past 70 % (a series: any episode), no grade yet.
 // Never cached: it changes with every film played.
 // CUB's dump (2026-10-31): {bookmarks: [{id, type, card_id, card_type: movie|tv, time (ms), data: Lampa's card as
 // JSON text, …}]}, oldest first: ~320 KB for 365 history entries. Only the newest 100 history cards are parsed (the
@@ -922,13 +924,15 @@ const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 async function mine(request, env) {
   const who = await cubUser(request, env);
   if (!who) return corsError(request, 'CUB sign-in required.', 401);
-  const [dump, ours] = await Promise.all([cubApi(request, 'bookmarks/dump'), env.DB
+  const [dump, ours, graded] = await Promise.all([cubApi(request, 'bookmarks/dump'), env.DB
     ? env.DB.prepare('SELECT card, mark FROM marks WHERE who = ?').bind(who).all().then((r) => r.results).catch(() => [])
-    : []]);
+    : [], env.GRADES ? env.GRADES.get(who, 'json').catch(() => null) : null]);
   if (!dump || !Array.isArray(dump.bookmarks)) return corsError(request, 'CUB unavailable.', 502);
   const marks = {};
   for (const b of dump.bookmarks) if (MARKS.includes(b.type) && /^(movie|tv)$/.test(b.card_type)) marks[`${b.card_type}_${b.card_id}`] = b.type;
   for (const m of ours) marks[m.card] = m.mark;
+  const grades = {};
+  for (const [k, v] of Object.entries(graded || {})) if (v && v.g != null) grades[k] = v.g; // null: removed
   const parsed = (b) => {
     try {
       const card = typeof b.data === 'string' ? JSON.parse(b.data) : b.data;
@@ -941,7 +945,9 @@ async function mine(request, env) {
     .sort((a, b) => (Number(b.time) || 0) - (Number(a.time) || 0));
   const markOf = (b) => marks[`${b.card_type}_${b.card_id}`];
   const all = newest('history');
-  const history = all.filter((b) => !AWAY.has(markOf(b))).slice(0, 100).map(parsed).filter(Boolean);
+  const recent = all.slice(0, 100).map((b) => (AWAY.has(markOf(b)) ? { ...parsed(b), away: true } : parsed(b)))
+    .filter((h) => h?.card);
+  const history = recent.filter((h) => !h.away);
   const laterIds = new Set();
   const later = [...all.filter((b) => markOf(b) === 'scheduled'), ...newest('scheduled')]
     .filter((b) => !laterIds.has(`${b.card_type}_${b.card_id}`) && laterIds.add(`${b.card_type}_${b.card_id}`))
@@ -962,8 +968,22 @@ async function mine(request, env) {
     const p = points.get(hash(h.card));
     return p && p.time >= FILM_STARTED_S && p.percent < 90;
   };
+  // ponytail: every point past 70 % read (~300 in 2026-10, one small query); a series' episodes hashed up to its
+  // seasons (30 when CUB's card doesn't say) × 30 episodes, as grades-patch.js scans them
+  const done = new Set(env.DB ? (await env.DB.prepare('SELECT hash FROM timeline WHERE percent >= 70').all()
+    .then((r) => r.results).catch(() => [])).map((p) => p.hash) : []);
+  const watched = (h) => {
+    if (h.type === 'movie') return done.has(hash(h.card));
+    const original = h.card.original_name || h.card.name || '';
+    for (let s = 1; s <= Math.min(Number(h.card.number_of_seasons) || 30, 30); s++) {
+      for (let e = 1; e <= 30; e++) if (done.has(episodeKey([s, e], original))) return true;
+    }
+    return false;
+  };
+  const rate = recent.filter((h) => !(`${h.type}_${h.card.id}` in grades) && watched(h)).slice(0, 20);
   const rows = [];
-  for (const [title, list] of [['Continue browsing', history.filter(going).slice(0, 19)], ['Finish later', later]]) {
+  for (const [title, list] of [['Continue browsing', history.filter(going).slice(0, 19)], ['Finish later', later],
+    ['Rate what you watched', rate]]) {
     // English: a series' from shows, the others from the search index or TMDB
     const rest = list.filter((h) => !(h.type === 'tv' && info.has(Number(h.card.id))));
     const english = await englishCards(env, rest.map((h) => [h.type, Number(h.card.id)]), rest.map((h) => cardOf(h.card, h.type)), 10);
@@ -971,7 +991,7 @@ async function mine(request, env) {
       ? JSON.parse(info.get(Number(h.card.id)).card) : english[rest.indexOf(h)]));
     if (cards.length) rows.push([title, cards]);
   }
-  return new Response(JSON.stringify({ rows, marks }), {
+  return new Response(JSON.stringify({ rows, marks, grades }), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(request) },
   });
 }
