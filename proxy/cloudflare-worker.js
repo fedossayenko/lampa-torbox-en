@@ -1113,7 +1113,7 @@ async function mine(request, env) {
   // every series in the history but Not interested and Finish later ones: a new season may come years later
   const followed = once(all.filter((b) => b.card_type === 'tv' && !['thrown', 'scheduled'].includes(markOf(b))))
     .map(parsed).filter(Boolean);
-  const info = await shows(env, [...new Set([...series, ...later.filter((h) => h.type === 'tv'), ...followed]
+  const info = await shows(env, [...new Set([...series, ...later, ...followed, ...mylist].filter((h) => h.type === 'tv')
     .map((h) => Number(h.card.id)))]);
   const hash = (c) => lampaHash(c.original_title || c.title || '');
   const lastKey = (h) => {
@@ -1129,17 +1129,10 @@ async function mine(request, env) {
     const p = points.get(hash(h.card));
     return p && p.time >= FILM_STARTED_S && p.percent < 90;
   };
-  // ponytail: every point past 70 % read (~300 in 2026-10, one small query); a series' episodes hashed up to its
-  // seasons (30 when CUB's card doesn't say) × 30 episodes, as grades-patch.js scans them
+  // ponytail: every point past 70 % read (~300 in 2026-10, one small query)
   const done = new Map((await db('SELECT hash, percent, updated FROM timeline WHERE percent >= 70')).map((p) => [p.hash, p]));
-  const watched = (h) => {
-    if (h.type === 'movie') return done.has(hash(h.card));
-    const original = h.card.original_name || h.card.name || '';
-    for (let s = 1; s <= Math.min(Number(h.card.number_of_seasons) || 30, 30); s++) {
-      for (let e = 1; e <= 30; e++) if (done.has(episodeKey([s, e], original))) return true;
-    }
-    return false;
-  };
+  // a series once you're caught up: its last aired episode past 70 % (not one episode of it: user 2026-10-31)
+  const watched = (h) => (h.type === 'movie' ? done.has(hash(h.card)) : done.has(lastKey(h)));
   const rate = recent.filter((h) => !(`${h.type}_${h.card.id}` in grades) && watched(h)).slice(0, 20);
   const newOnes = followed.map((h) => {
     const s = info.get(Number(h.card.id));
@@ -1152,11 +1145,14 @@ async function mine(request, env) {
   const isNew = (h) => h.type === 'tv' && `tv_${h.card.id}` in fresh;
   const continuing = [...followed.filter(isNew), ...history.filter((h) => going(h) && !isNew(h))].slice(0, 19);
   // English cards: a series' from shows, the others from the search index or TMDB (15 a request at most)
-  // My list without the films you finished (90 %, here or in Lampa) or marked Watched it (user 2026-10-31): hidden,
-  // not removed from CUB (Lampa's Bookmarks keep them; ⋯ removes); series stay, a new season may come
-  const finished = (h) => marks[`${h.type}_${h.card.id}`] === 'viewed' || (h.type === 'movie' && done.get(hash(h.card))?.percent >= 90);
-  const lists = [['Continue browsing', continuing], ['My list', mylist.filter((h) => !finished(h))], ['Finish later', later],
-    ['Rate what you watched', rate]];
+  // My list and Finish later without what you watched (user 2026-10-31), here or in Lampa: a film 90 % or marked
+  // Watched it, a series that ended, to its last episode; one running on stays (a new season may come). Hidden, not
+  // removed from CUB (Lampa's Bookmarks keep them; ⋯ removes).
+  const finished = (h) => marks[`${h.type}_${h.card.id}`] === 'viewed' || (h.type === 'movie'
+    ? done.get(hash(h.card))?.percent >= 90
+    : ['Ended', 'Canceled'].includes(info.get(Number(h.card.id))?.status) && done.get(lastKey(h))?.percent >= 90);
+  const lists = [['Continue browsing', continuing], ['My list', mylist.filter((h) => !finished(h))],
+    ['Finish later', later.filter((h) => !finished(h))], ['Rate what you watched', rate]];
   const rest = [...new Map(lists.flatMap(([, l]) => l).filter((h) => !(h.type === 'tv' && info.has(Number(h.card.id))))
     .map((h) => [`${h.type}:${h.card.id}`, h])).values()];
   const english = await englishCards(env, rest.map((h) => [h.type, Number(h.card.id)]), rest.map((h) => cardOf(h.card, h.type)), 15);
