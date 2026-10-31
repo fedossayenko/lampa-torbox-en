@@ -889,3 +889,38 @@ test('segments: the stick only, 6 episodes at most, nonsense ones dropped', asyn
   assert.equal(asked.length, 12);
   assert.equal(keys.filter((k) => k === 'Bearer tidb-key').length, 6); // TheIntroDB's, with the key
 });
+
+// Our own intro times (intro-detect.py on the old MacBook) beat the community's, per release; missing ones queue a job.
+test('segments: our own intro for the release played wins; episodes without one queue a job', async () => {
+  skipEnv = { ...playEnv, DB: d1() };
+  skipAnswers(foundation);
+  const asks = (q) => skip(`tv/93740/tt0804484?e=1:9,1:10&h=${H}&f=8&n=Foundation.S01E09.mkv&o=Foundation${q}`);
+  assert.deepEqual(await (await asks('')).json(), { '1:9': 'intro:0-58867;credits:3395489-' });
+  const job = skipEnv.DB.raw.prepare('SELECT key, file, name, series FROM intro_jobs').all();
+  assert.deepEqual(job.map((j) => ({ ...j })), [{ key: `${H}/1/9`, file: 8, name: 'Foundation.S01E09.mkv', series: 'Foundation' }]);
+  // the detector takes it, finds S1 E9's titles at 31.8-113.9 s, E10's at 40-122 s
+  const jobs = await (await worker.fetch(new Request('https://w/segments/jobs', { headers: stick }), skipEnv)).json();
+  assert.deepEqual(jobs.jobs.map((j) => [j.key, j.have]), [[`${H}/1/9`, []]]);
+  const own = (body, token = stick) => worker.fetch(new Request('https://w/segments/own', {
+    method: 'POST', headers: { ...token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), skipEnv);
+  assert.equal((await own({ intros: [] }, {})).status, 403);
+  assert.equal((await own({ intros: [{ hash: H, season: 1, episode: 9, start: 31800, end: 113900 },
+    { hash: H, season: 1, episode: 10, start: 40000, end: 122000 }, { hash: 'x', season: 1, episode: 1, start: 0, end: 1 }],
+    done: [`${H}/1/9`] })).status, 204);
+  assert.equal(skipEnv.DB.raw.prepare('SELECT count(*) n FROM intro_jobs').get().n, 0);
+  skipAnswers(foundation);
+  assert.deepEqual(await (await asks('')).json(), { '1:9': 'intro:31800-113900;credits:3395489-', '1:10': 'intro:40000-122000' });
+  assert.equal(skipEnv.DB.raw.prepare('SELECT count(*) n FROM intro_jobs').get().n, 0, 'nothing left to find');
+  // another release of the same episodes: the community's again
+  assert.deepEqual(await (await skip(`tv/93740/tt0804484?e=1:9&h=${'cd'.repeat(20)}`)).json(), { '1:9': 'intro:0-58867;credits:3395489-' });
+});
+
+test('play ?probe: links that mark nothing watched, and /stream answers them', async () => {
+  torbox({ ...ready, 'mylist?id': { success: true, data: season } });
+  const e = seasonEnv();
+  const res = await series(e, 'file=1&name=Foundation.S01E09.mkv&series=Foundation&probe=1');
+  assert.ok(res.playlist[1][4].startsWith('https://w/stream/11/5?tl=&prev=&sig='), res.playlist[1][4]);
+  torbox(ready);
+  assert.equal((await worker.fetch(new Request(res.playlist[1][4]), e)).status, 302);
+  assert.equal(e.DB.raw.prepare('SELECT count(*) n FROM timeline').get().n, 0);
+});

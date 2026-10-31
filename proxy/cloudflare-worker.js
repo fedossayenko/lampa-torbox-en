@@ -427,11 +427,79 @@ async function segments(request, env, type, tmdb, imdb) {
       .bind(now, JSON.stringify(fresh.map((g) => ({ k: g.k, v: g.value })))).run().catch(() => {});
   }
   for (const g of got) kept.set(g.k, g.value);
+  const own = type === 'tv' ? await ownIntros(request, env, eps, now) : new Map();
   const body = {};
-  for (const x of eps) if (kept.get(key(x))) body[`${x[0]}:${x[1]}`] = kept.get(key(x));
+  for (const x of eps) {
+    const value = withOwnIntro(kept.get(key(x)) || '', own.get(`${x[0]}:${x[1]}`));
+    if (value) body[`${x[0]}:${x[1]}`] = value;
+  }
   return new Response(JSON.stringify(body), {
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(request) },
   });
+}
+
+// Our own intro times (D1 intros), found by the old MacBook's intro-detect.py in the very release played: the stretch
+// of identical sound two episodes share in their first 4 minutes, their opening titles. Community timings are often
+// a guess (Foundation: "0-84 s" in every episode, while S1 E9's titles run 31.8-113.9 s after a recap). Asked with
+// the release (?h=<hash>&f=<file>&n=<name>&o=<original series name>, lampa-native sends them); episodes with none
+// yet queue a job (D1 intro_jobs) for the detector: the one played and the 5 after it.
+async function ownIntros(request, env, eps, now) {
+  const q = new URL(request.url).searchParams;
+  const hash = q.get('h') || '';
+  const own = new Map();
+  if (!env.DB || !/^[0-9a-f]{40}$/.test(hash) || !eps.length) return own;
+  try {
+    const rows = (await env.DB.prepare('SELECT key, start_ms, end_ms FROM intros WHERE key IN (SELECT value FROM json_each(?))')
+      .bind(JSON.stringify(eps.map(([s, e]) => `${hash}/${s}/${e}`))).all()).results;
+    for (const r of rows) own.set(r.key.split('/').slice(1).join(':'), [r.start_ms, r.end_ms]);
+    if (eps.some(([s, e]) => !own.has(`${s}:${e}`)) && q.get('n')) {
+      const [s, e] = eps[0];
+      await env.DB.prepare(`INSERT INTO intro_jobs (key, file, name, series, t) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (key) DO UPDATE SET t = excluded.t`)
+        .bind(`${hash}/${s}/${e}`, Number(q.get('f') ?? -1), q.get('n'), q.get('o') || '', now).run();
+    }
+  } catch { /* the community's times then */ }
+  return own;
+}
+
+// "intro:0-84000;credits:3390000-" with our own intro [31800, 113900] -> "intro:31800-113900;credits:3390000-": theirs
+// (and a recap overlapping ours) dropped
+function withOwnIntro(value, intro) {
+  if (!intro) return value;
+  const [start, end] = intro;
+  const rest = value.split(';').filter((p) => p && !p.startsWith('intro:') && !(p.startsWith('recap:')
+    && Number(p.slice(6).split('-')[0]) < end && Number(p.slice(6).split('-')[1]) > start));
+  return [`intro:${start}-${end}`, ...rest].join(';');
+}
+
+// GET /segments/jobs -> {jobs: [{key: "<hash>/<season>/<episode>", file, name, series, have: ["1:9", …]}]}, the
+// oldest 5; POST /segments/own {intros: [{hash, season, episode, start, end}] (ms), done: [<job key>]} -> 204.
+// The detector's (X-Play-Token).
+async function introJobs(request, env) {
+  if (!sameSecret(request.headers.get('X-Play-Token'), env.PLAY_TOKEN)) return corsError(request, 'Forbidden.', 403);
+  const json = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(request) };
+  if (request.method === 'GET') {
+    const jobs = (await env.DB.prepare('SELECT key, file, name, series FROM intro_jobs ORDER BY t LIMIT 5').all()).results;
+    for (const j of jobs) {
+      j.have = (await env.DB.prepare("SELECT key FROM intros WHERE key LIKE ?").bind(`${j.key.split('/')[0]}/%`).all())
+        .results.map((r) => r.key.split('/').slice(1).join(':'));
+    }
+    return new Response(JSON.stringify({ jobs }), { headers: json });
+  }
+  const body = await request.json().catch(() => ({}));
+  const intros = (Array.isArray(body.intros) ? body.intros : []).filter((x) => /^[0-9a-f]{40}$/.test(x.hash)
+    && [x.season, x.episode, x.start, x.end].every(Number.isInteger) && x.end > x.start && x.start >= 0);
+  if (intros.length) {
+    await env.DB.prepare(`INSERT INTO intros (key, start_ms, end_ms, t) SELECT j.value->>'k', j.value->>'s', j.value->>'e', ?
+      FROM json_each(?) AS j WHERE true ON CONFLICT (key) DO UPDATE SET start_ms = excluded.start_ms, end_ms = excluded.end_ms,
+      t = excluded.t`).bind(Date.now(), JSON.stringify(intros.map((x) => ({
+      k: `${x.hash}/${x.season}/${x.episode}`, s: x.start, e: x.end })))).run();
+  }
+  const done = (Array.isArray(body.done) ? body.done : []).filter((k) => typeof k === 'string');
+  if (done.length) {
+    await env.DB.prepare('DELETE FROM intro_jobs WHERE key IN (SELECT value FROM json_each(?))').bind(JSON.stringify(done)).run();
+  }
+  return new Response(null, { status: 204, headers: corsHeaders(request) });
 }
 
 // GET /streams/movie/<imdb id> or /streams/series/<imdb id>/<season>/<episode>[?lang=RU,UA][&from=6] -> lampa-native's
@@ -613,7 +681,8 @@ async function play(request, env, ctx, hash) {
     // requestdl takes the key as a parameter (it is built for browser redirects); server to server only
     const dl = await torboxApi(env, `requestdl?token=${encodeURIComponent(env.TORBOX_API_KEY)}&torrent_id=${id}&file_id=${file.id}`);
     if (typeof dl?.data !== 'string') return corsError(request, dl?.detail || 'No link.', 502);
-    const playlist = q.has('series') ? await episodesFrom(request, env, ctx, id, files, file, q.get('series'), dl.data) : [];
+    const playlist = q.has('series')
+      ? await episodesFrom(request, env, ctx, id, files, file, q.get('series'), dl.data, q.has('probe')) : [];
     return new Response(JSON.stringify(playlist.length
       ? { url: playlist[0][4], ...(await resume), playlist } : { url: dl.data, ...(await resume) }), {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(request) },
@@ -637,7 +706,8 @@ const episodeKey = ([s, e], original) => lampaHash(`${s}${s > 10 ? ':' : ''}${e}
 // [season, episode, Lampa's key, file name, link]: the link is this worker's /stream address of that file, the same
 // every time (DDD keeps its own resume point per address), which gets TorBox's link when DDD asks for it (TorBox's
 // links don't live for a whole night of episodes). 30 at most; none when the file names say no episode.
-async function episodesFrom(request, env, ctx, torrent, files, file, original, link) {
+// probe (intro-detect.py): links that mark nothing watched (no Lampa key, no previous episode).
+async function episodesFrom(request, env, ctx, torrent, files, file, original, link, probe = false) {
   if (!episodeOf(file.short_name || file.name)) return [];
   const all = files.filter((f) => VIDEO.test(f.name) && !/\bsample\b/i.test(f.name))
     .map((f) => ({ f, at: episodeOf(f.short_name || f.name) })).filter((x) => x.at)
@@ -648,8 +718,8 @@ async function episodesFrom(request, env, ctx, torrent, files, file, original, l
   const origin = new URL(request.url).origin;
   await keepLink(ctx, origin, torrent, file.id, link); // DDD's first ask for it costs no TorBox call
   return Promise.all(all.slice(from, from + 30).map(async (x, i) => {
-    const key = episodeKey(x.at, original);
-    const prev = from + i > 0 ? episodeKey(all[from + i - 1].at, original) : '';
+    const key = probe ? '' : episodeKey(x.at, original);
+    const prev = !probe && from + i > 0 ? episodeKey(all[from + i - 1].at, original) : '';
     const sig = await signed(env, `${torrent}/${x.f.id}/${key}/${prev}`);
     return [x.at[0], x.at[1], key, x.f.short_name || String(x.f.name).split('/').pop(),
       `${origin}/stream/${torrent}/${x.f.id}?tl=${key}&prev=${prev}&sig=${sig}`];
@@ -691,7 +761,7 @@ async function stream(request, env, ctx, torrent, fileId) {
   const q = new URL(request.url).searchParams;
   const tl = q.get('tl') || '';
   const prev = q.get('prev') || '';
-  if (!/^\d{1,10}$/.test(tl) || !/^\d{0,10}$/.test(prev)
+  if (!/^\d{0,10}$/.test(tl) || !/^\d{0,10}$/.test(prev) // no tl: intro-detect.py's probe
     || !sameSecret(q.get('sig') || '', await signed(env, `${torrent}/${fileId}/${tl}/${prev}`))) {
     return corsError(request, 'Forbidden.', 403);
   }
@@ -967,6 +1037,7 @@ export default {
       return sources(request, env, src[1], src[2], src[3], src[4]);
     }
 
+    if (/^\/segments\/(jobs|own)$/.test(new URL(request.url).pathname) && env.DB) return introJobs(request, env);
     const skip = new URL(request.url).pathname.match(/^\/segments\/(movie|tv)\/(\d+)\/(tt\d+)$/);
     if (skip && request.method === 'GET') return segments(request, env, skip[1], skip[2], skip[3]);
     const link = new URL(request.url).pathname.match(/^\/play\/([0-9a-f]{40})$/);
