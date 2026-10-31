@@ -465,7 +465,7 @@ async function ownIntros(request, env, eps, now) {
 // "intro:0-84000;credits:3390000-" with our own intro [31800, 113900] -> "intro:31800-113900;credits:3390000-": theirs
 // (and a recap overlapping ours) dropped
 function withOwnIntro(value, intro) {
-  if (!intro) return value;
+  if (!intro?.[1]) return value; // [0, 0]: the detector found none (a finale's own opening), theirs then
   const [start, end] = intro;
   const rest = value.split(';').filter((p) => p && !p.startsWith('intro:') && !(p.startsWith('recap:')
     && Number(p.slice(6).split('-')[0]) < end && Number(p.slice(6).split('-')[1]) > start));
@@ -473,7 +473,8 @@ function withOwnIntro(value, intro) {
 }
 
 // GET /segments/jobs -> {jobs: [{key: "<hash>/<season>/<episode>", file, name, series, have: ["1:9", …]}]}, the
-// oldest 5; POST /segments/own {intros: [{hash, season, episode, start, end}] (ms), done: [<job key>]} -> 204.
+// oldest 5; POST /segments/own {intros: [{hash, season, episode, start, end}] (ms; 0-0 when none found, so the
+// episode isn't queued again), done: [<job key>]} -> 204.
 // The detector's (X-Play-Token).
 async function introJobs(request, env) {
   if (!sameSecret(request.headers.get('X-Play-Token'), env.PLAY_TOKEN)) return corsError(request, 'Forbidden.', 403);
@@ -488,7 +489,7 @@ async function introJobs(request, env) {
   }
   const body = await request.json().catch(() => ({}));
   const intros = (Array.isArray(body.intros) ? body.intros : []).filter((x) => /^[0-9a-f]{40}$/.test(x.hash)
-    && [x.season, x.episode, x.start, x.end].every(Number.isInteger) && x.end > x.start && x.start >= 0);
+    && [x.season, x.episode, x.start, x.end].every(Number.isInteger) && x.start >= 0 && (x.end > x.start || x.end === 0));
   if (intros.length) {
     await env.DB.prepare(`INSERT INTO intros (key, start_ms, end_ms, t) SELECT j.value->>'k', j.value->>'s', j.value->>'e', ?
       FROM json_each(?) AS j WHERE true ON CONFLICT (key) DO UPDATE SET start_ms = excluded.start_ms, end_ms = excluded.end_ms,
