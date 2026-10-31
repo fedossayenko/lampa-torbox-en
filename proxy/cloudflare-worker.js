@@ -1187,7 +1187,8 @@ async function mine(request, env) {
 // = found by the filters]}: each guess looked up on TMDB (a year off by more than one halves it), a recommendation's
 // filters searched too (TMDB discover). Without "understood" (the MacBook off, the plan's limit reached) a free
 // Workers AI model reads the text here: titles as well as Claude in the test of 2026-10-31, recommendations worse.
-// open: one title that sure (85+) and 25 ahead of the next opens at once.
+// open: one title that sure (75+) and 50 ahead of the next opens at once (an exact title Claude rates 80, a same-name
+// film 10: Foundation, 2026-10-31).
 const HEARS = '@cf/deepgram/nova-3';
 const READS = '@cf/meta/llama-4-scout-17b-16e-instruct';
 const VOICE_WAV_MAX = 1e6; // 30 s
@@ -1274,7 +1275,7 @@ async function voiceFind(request, env) {
   const results = [...found.filter(Boolean), ...more]
     .filter((c) => !seen.has(`${c[1]}:${c[0]}`) && seen.add(`${c[1]}:${c[0]}`)).slice(0, 20);
   const [a, b] = results;
-  const open = intent !== 'recommend' && Boolean(a) && a[7] >= 85 && (!b || b[7] <= a[7] - 25);
+  const open = intent !== 'recommend' && Boolean(a) && a[7] >= 75 && (!b || b[7] <= a[7] - 50);
   return voiceAnswer(request, { intent, by, open, results });
 }
 

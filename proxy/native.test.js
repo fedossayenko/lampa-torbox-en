@@ -1218,6 +1218,10 @@ test('voice/find: Claude\'s guesses checked on TMDB by year (any year when none)
     { title: 'Interstellar2', year: 2014, type: 'movie', confidence: 0.8 }, { title: 'Nothing', year: 1990, type: 'movie', confidence: 0.9 }] });
   assert.deepEqual(two.results.map((c) => [c[0], c[7]]), [[157336, 60], [1, 40]]);
   assert.equal(two.open, false);
+  // an exact title Claude rates 80 beside a same-name one at 10 (Foundation the series, the film): opens
+  const named = await ask({ intent: 'title', candidates: [{ title: 'Interstellar', year: 2014, type: 'movie', confidence: 0.8 },
+    { title: 'Interstellar2', year: 2030, type: 'movie', confidence: 0.1 }] });
+  assert.deepEqual([named.open, named.results.map((c) => c[7])], [true, [80, 10]]);
 });
 
 test('voice/find: a recommendation = the picks, then TMDB discover by its keywords, genres, years, family (PG); each once', async () => {
