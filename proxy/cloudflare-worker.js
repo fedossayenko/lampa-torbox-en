@@ -361,6 +361,79 @@ async function filmCard(request, env, type, id) {
   });
 }
 
+// GET /segments/movie/<tmdb id>/<imdb id> or /segments/tv/<tmdb id>/<imdb id>?e=1:9,1:10 (6 at most) -> what DDD can
+// skip, in our DDD fork's "segments" format: {"1:9": "intro:0-58867;credits:3395489-"} (ms; no end: to the end of the
+// video; a film's under "0:0"; none: left out). From IntroDB (introdb.app, by IMDb id) and TheIntroDB (theintrodb.org,
+// by TMDB id): community timings, often one person's. Where they differ, the intro (recap) that ends first and the
+// credits that start last: a wrong one leaves a few seconds of intro, never cuts the story. Kept in D1 (segments.sql)
+// a week, a day when neither has any (they fill in); not when one was down. TheIntroDB without a key allows 5000
+// asks a day per address, and Cloudflare's are shared (429): THEINTRODB_API_KEY (wrangler secret) lifts that. For the
+// stick (X-Play-Token).
+const SEGMENTS_MAX = 6;
+const SEGMENTS_KEEP = 7 * 86400e3;
+const SEGMENTS_NONE_KEEP = 86400e3;
+
+// IntroDB's {intro, recap, outro: {start_ms, end_ms}} and TheIntroDB's {intro, recap, credits: [{start_ms, end_ms}]}
+// (start null: from 0; end null: to the end) -> "intro:0-58867;credits:3395489-" ('' when none)
+function mergeSegments(introdb, theintrodb) {
+  const out = [];
+  for (const kind of ['intro', 'recap', 'credits']) {
+    const a = introdb?.[kind === 'credits' ? 'outro' : kind];
+    const all = [...(a && typeof a === 'object' ? [a] : []), ...(Array.isArray(theintrodb?.[kind]) ? theintrodb[kind] : [])]
+      .map((x) => [Math.round(Number(x.start_ms) || 0), x.end_ms == null ? null : Math.round(Number(x.end_ms))])
+      .filter(([s, e]) => (kind === 'credits' ? s > 0 && (e === null || e > s) : e !== null && e > s));
+    if (!all.length) continue;
+    const [s, e] = all.reduce((m, x) => (kind === 'credits' ? (x[0] > m[0] ? x : m) : (x[1] < m[1] ? x : m)));
+    out.push(`${kind}:${s}-${e ?? ''}`);
+  }
+  return out.join(';');
+}
+
+// One film's or episode's from both: {value, ok} (ok: both answered, 404 included: worth keeping)
+async function fetchSegments(env, tmdb, imdb, season, episode) {
+  const ask = (url, headers = {}) => fetch(url, { headers, signal: AbortSignal.timeout(4000) })
+    .then((r) => (r.ok ? r.json() : r.status === 404 ? {} : (console.log('segments', r.status, url), null)))
+    .catch((e) => (console.log('segments', String(e), url), null));
+  const ep = `&season=${season}&episode=${episode}`;
+  const [a, b] = await Promise.all([
+    ask(`https://api.introdb.app/segments?imdb_id=${imdb}${season ? ep : '&is_movie=true'}`),
+    ask(`https://api.theintrodb.org/v4/media?tmdb_id=${tmdb}${season ? ep : ''}`,
+      env.THEINTRODB_API_KEY ? { Authorization: `Bearer ${env.THEINTRODB_API_KEY}` } : {}),
+  ]);
+  return { value: mergeSegments(a, b), ok: a !== null && b !== null };
+}
+
+async function segments(request, env, type, tmdb, imdb) {
+  if (!sameSecret(request.headers.get('X-Play-Token'), env.PLAY_TOKEN)) return corsError(request, 'Forbidden.', 403);
+  const eps = type === 'movie' ? [[0, 0]] : (new URL(request.url).searchParams.get('e') || '').split(',')
+    .map((x) => x.match(/^(\d{1,2}):(\d{1,3})$/)).filter(Boolean).map((m) => [Number(m[1]), Number(m[2])])
+    .slice(0, SEGMENTS_MAX);
+  const key = ([s, e]) => `${type}/${tmdb}/${s}/${e}`;
+  const now = Date.now();
+  const kept = new Map();
+  if (env.DB && eps.length) {
+    try {
+      const rows = (await env.DB.prepare('SELECT key, value, t FROM segments WHERE key IN (SELECT value FROM json_each(?))')
+        .bind(JSON.stringify(eps.map(key))).all()).results;
+      for (const r of rows) if (r.t > now - (r.value ? SEGMENTS_KEEP : SEGMENTS_NONE_KEEP)) kept.set(r.key, r.value);
+    } catch { /* no cache beats no answer */ }
+  }
+  const got = await Promise.all(eps.filter((x) => !kept.has(key(x)))
+    .map(async (x) => ({ k: key(x), ...(await fetchSegments(env, tmdb, imdb, x[0], x[1])) })));
+  const fresh = got.filter((g) => g.ok);
+  if (env.DB && fresh.length) {
+    await env.DB.prepare(`INSERT INTO segments (key, value, t) SELECT j.value->>'k', j.value->>'v', ?
+      FROM json_each(?) AS j WHERE true ON CONFLICT (key) DO UPDATE SET value = excluded.value, t = excluded.t`)
+      .bind(now, JSON.stringify(fresh.map((g) => ({ k: g.k, v: g.value })))).run().catch(() => {});
+  }
+  for (const g of got) kept.set(g.k, g.value);
+  const body = {};
+  for (const x of eps) if (kept.get(key(x))) body[`${x[0]}:${x[1]}`] = kept.get(key(x));
+  return new Response(JSON.stringify(body), {
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(request) },
+  });
+}
+
 // GET /streams/movie/<imdb id> or /streams/series/<imdb id>/<season>/<episode>[?lang=RU,UA][&from=6] -> lampa-native's
 // sources: {streams: [[hash, fileIdx, title, badges, size, seeders, tracker, languages, cached]], next, total,
 // languages: [[code, releases]]}. Torrentio's list (Cloudflare caches it: 3-8 ms from here), each torrent once,
@@ -894,6 +967,8 @@ export default {
       return sources(request, env, src[1], src[2], src[3], src[4]);
     }
 
+    const skip = new URL(request.url).pathname.match(/^\/segments\/(movie|tv)\/(\d+)\/(tt\d+)$/);
+    if (skip && request.method === 'GET') return segments(request, env, skip[1], skip[2], skip[3]);
     const link = new URL(request.url).pathname.match(/^\/play\/([0-9a-f]{40})$/);
     if (link && request.method === 'GET') return play(request, env, ctx, link[1]);
     const file = new URL(request.url).pathname.match(/^\/stream\/(\d+)\/(\d+)$/);
