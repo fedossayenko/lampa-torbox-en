@@ -273,3 +273,153 @@ test('badges: resolution, Dolby Vision, HDR, REMUX, codec, audio; in that order,
   const body = await (await streams('movie/tt1', env)).json();
   assert.deepEqual(body.streams.map((r) => r[3]), cases.map(([, badges]) => badges)); // equal sizes: Torrentio's order
 });
+
+// Play: a TorBox link for one file of a torrent, for DDD. Only with the stick's token: the route adds torrents to
+// the TorBox account and hands out its download links.
+const playEnv = { ...streamsEnv, PLAY_TOKEN: 'stick-token' };
+const H = 'ab'.repeat(20);
+function torbox(answers) {
+  asked = [];
+  headers = [];
+  globalThis.fetch = async (url, init) => {
+    asked.push(String(url));
+    headers.push(new Headers(init?.headers));
+    const u = new URL(url);
+    const key = u.pathname.replace('/v1/api/torrents/', '') + (u.searchParams.get('id') ? '?id' : '');
+    const body = answers[key];
+    if (init?.body) asked.push(await new Response(init.body).text());
+    return body ? new Response(JSON.stringify(body)) : new Response('down', { status: 500 });
+  };
+}
+const pack = {
+  id: 11, hash: H, download_present: true, download_finished: true, progress: 1,
+  files: [
+    { id: 0, name: 'Show S01/Show.S01E01.mkv', short_name: 'Show.S01E01.mkv', size: 2e9 },
+    { id: 1, name: 'Show S01/Show.S01E02.mkv', short_name: 'Show.S01E02.mkv', size: 3e9 },
+    { id: 2, name: 'Show S01/Extras.mkv', short_name: 'Extras.mkv', size: 1e9 },
+    { id: 3, name: 'Show S01/sample.nfo', short_name: 'sample.nfo', size: 9e9 },
+  ],
+};
+const play = (path, token = 'stick-token') =>
+  worker.fetch(new Request('https://w/play/' + path, { headers: token ? { 'X-Play-Token': token } : {} }), playEnv);
+
+test('play: without the stick\'s token nothing is asked of TorBox', async () => {
+  torbox({});
+  assert.equal((await play(`${H}?file=1`, null)).status, 403);
+  assert.equal((await play(`${H}?file=1`, 'stick-tokeN')).status, 403);
+  assert.equal((await worker.fetch(new Request(`https://w/play/${H}`, { headers: { 'X-Play-Token': '' } }), streamsEnv)).status, 403); // no secret set
+  assert.deepEqual(asked, []);
+});
+
+test('play: adds the torrent, picks the file Torrentio meant by its name, answers TorBox\'s link (never cached)', async () => {
+  torbox({
+    createtorrent: { success: true, data: { torrent_id: 11, hash: H } },
+    'mylist?id': { success: true, data: pack },
+    requestdl: { success: true, data: 'https://store.torbox.app/dl/xyz' },
+  });
+  const res = await play(`${H}?file=0&name=Show.S01E02.mkv`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('Cache-Control'), 'no-store');
+  assert.deepEqual(await res.json(), { url: 'https://store.torbox.app/dl/xyz', time: 0, percent: 0 }); // no tl
+  assert.ok(asked[1].includes(`magnet:?xt=urn:btih:${H}`), asked[1]); // the createtorrent form
+  const dl = new URL(asked.find((u) => u.includes('requestdl')));
+  assert.equal(dl.searchParams.get('torrent_id'), '11');
+  assert.equal(dl.searchParams.get('file_id'), '1'); // by name, though Torrentio's index said 0
+  assert.equal(dl.searchParams.get('token'), 'tb-test-key'); // requestdl takes the key as a parameter only
+  for (const h of headers) assert.equal(h.get('Authorization'), 'Bearer tb-test-key');
+});
+
+test('play: a torrent already in the account is found in the list; no name match → Torrentio\'s index → the biggest video', async () => {
+  torbox({
+    createtorrent: { success: false, error: 'DOWNLOAD_EXISTS' },
+    mylist: { success: true, data: [{ id: 5, hash: 'cd'.repeat(20) }, { id: 11, hash: H.toUpperCase() }] },
+    'mylist?id': { success: true, data: pack },
+    requestdl: { success: true, data: 'https://store.torbox.app/dl/xyz' },
+  });
+  assert.equal((await play(`${H}?file=2&name=Other.mkv`)).status, 200);
+  assert.equal(new URL(asked.find((u) => u.includes('requestdl'))).searchParams.get('file_id'), '2');
+  await play(`${H}?file=-1&name=`);
+  assert.equal(new URL(asked.findLast((u) => u.includes('requestdl'))).searchParams.get('file_id'), '1'); // 3 GB, not the .nfo
+});
+
+test('play: still downloading on TorBox → 202 with its progress; TorBox down → 502', async () => {
+  torbox({
+    createtorrent: { success: true, data: { torrent_id: 11 } },
+    'mylist?id': { success: true, data: { ...pack, download_present: false, download_finished: false, progress: 0.423 } },
+  });
+  const res = await play(`${H}?file=1`);
+  assert.equal(res.status, 202);
+  assert.deepEqual(await res.json(), { progress: 42 });
+  torbox({});
+  assert.equal((await play(`${H}?file=1`)).status, 502);
+});
+
+// Timeline: one table of resume points (D1) shared by lampa-native and Lampa (through the torbox-en plugin), keyed
+// by Lampa's hash of the title; per point the newer one wins. D1 is node:sqlite here, with D1's API around it.
+import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
+
+function d1() {
+  const db = new DatabaseSync(':memory:');
+  db.exec(readFileSync(new URL('./timeline.sql', import.meta.url), 'utf8'));
+  const stmt = (sql, args = []) => ({
+    bind: (...a) => stmt(sql, a),
+    all: async () => ({ results: db.prepare(sql).all(...args) }),
+    first: async () => db.prepare(sql).get(...args) ?? null,
+    run: async () => (db.prepare(sql).run(...args), { success: true }),
+  });
+  return { prepare: (sql) => stmt(sql), raw: db };
+}
+const ready = {
+  createtorrent: { success: true, data: { torrent_id: 11 } },
+  'mylist?id': { success: true, data: pack },
+  requestdl: { success: true, data: 'https://store.torbox.app/dl/xyz' },
+  '/api/users/get': { user: { id: 42 } },
+};
+const tlEnv = () => ({ ...playEnv, DB: d1(), CUB_ACCOUNTS: '42' });
+const stick = { 'X-Play-Token': 'stick-token' };
+const lampa = { 'X-Cub-Token': 'cub-token', 'X-Cub-Profile': '7' };
+const getTimeline = (e, h = stick) => worker.fetch(new Request('https://w/timeline', { headers: h }), e);
+const postTimeline = (e, timelines, h = stick) => worker.fetch(new Request('https://w/timeline', {
+  method: 'POST', headers: { ...h, 'Content-Type': 'application/json' }, body: JSON.stringify({ timelines }),
+}), e);
+
+test('timeline: the stick saves where DDD stopped (stamped now), Lampa reads it, play resumes there', async () => {
+  torbox(ready);
+  const e = tlEnv();
+  assert.equal((await postTimeline(e, [{ hash: '123', time: 3000, duration: 7000, percent: 43, card: 'movie_155' }])).status, 204);
+  const { timelines } = await (await getTimeline(e, lampa)).json();
+  assert.ok(Math.abs(timelines['123'].updated - Date.now()) < 5000, 'stamped by the worker');
+  assert.deepEqual({ ...timelines['123'], updated: 0 }, { time: 3000, duration: 7000, percent: 43, updated: 0, card: 'movie_155' });
+  const res = await (await worker.fetch(new Request(`https://w/play/${H}?file=1&tl=123`, { headers: stick }), e)).json();
+  assert.deepEqual(res, { url: 'https://store.torbox.app/dl/xyz', time: 3000, percent: 43 });
+});
+
+test('timeline: Lampa pushes its own (with its stamps, episodes keep season and episode); per point the newer wins', async () => {
+  torbox(ready);
+  const e = tlEnv();
+  await postTimeline(e, [
+    { hash: '1', time: 100, duration: 1000, percent: 10, updated: 2000 },
+    { hash: '2', time: 600, duration: 2400, percent: 25, updated: 2000, card: 'tv_1399', season: 1, episode: 5 },
+  ], lampa);
+  await postTimeline(e, [{ hash: '1', time: 50, duration: 1000, percent: 5, updated: 1000 }], lampa); // older: ignored
+  await postTimeline(e, [{ hash: '2', time: 900, duration: 2400, percent: 38, updated: 3000 }], lampa); // newer: wins
+  const { timelines } = await (await getTimeline(e)).json();
+  assert.deepEqual(timelines['1'], { time: 100, duration: 1000, percent: 10, updated: 2000 });
+  assert.deepEqual(timelines['2'], { time: 900, duration: 2400, percent: 38, updated: 3000, card: 'tv_1399', season: 1, episode: 5 });
+});
+
+test('timeline: only the stick or an allowed CUB account; bad points are refused; no point → play from the start', async () => {
+  torbox({ ...ready, '/api/users/get': { user: { id: 9 } } });
+  const e = tlEnv();
+  assert.equal((await getTimeline(e, {})).status, 403);
+  assert.equal((await getTimeline(e, lampa)).status, 403); // CUB account 9 isn't in CUB_ACCOUNTS
+  assert.equal((await postTimeline(e, [{ hash: '1', time: 1, duration: 2, percent: 50 }], { 'X-Play-Token': 'nope' })).status, 403);
+  assert.equal((await postTimeline(e, [{ hash: 'x1', time: 1, duration: 2, percent: 50 }])).status, 400);
+  assert.equal((await postTimeline(e, [{ hash: '1', time: 'x', duration: 2, percent: 50 }])).status, 400);
+  assert.equal((await postTimeline(e, Array.from({ length: 2001 }, (_, i) => ({ hash: String(i), time: 1, duration: 2, percent: 50 })))).status, 400);
+  assert.equal(e.DB.raw.prepare('select count(*) n from timeline').get().n, 0);
+  torbox(ready);
+  assert.deepEqual(await (await worker.fetch(new Request(`https://w/play/${H}?file=1&tl=5`, { headers: stick }), e)).json(),
+    { url: 'https://store.torbox.app/dl/xyz', time: 0, percent: 0 });
+});

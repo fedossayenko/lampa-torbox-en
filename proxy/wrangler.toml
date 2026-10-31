@@ -7,3 +7,9 @@ workers_dev = true
 [[kv_namespaces]]
 binding = "GRADES"
 id = "e224f2eb45e84ee49fc9fe6e4521b2cd"
+
+# lampa-native: resume points shared by lampa-native and Lampa (see /timeline; table: timeline.sql).
+[[d1_databases]]
+binding = "DB"
+database_name = "lampa-timeline"
+database_id = "f19bd34f-0798-4808-8127-ed4d02eec688"

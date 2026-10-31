@@ -365,6 +365,120 @@ async function sources(request, env, kind, imdb, season, episode) {
   });
 }
 
+// GET /play/<info hash>?file=<Torrentio's fileIdx>&name=<its file name>&tl=<Lampa timeline hash> with header
+// X-Play-Token -> {url, time, percent} for DDD (time: the resume point in seconds from /timeline, 0 = none), or
+// 202 {progress} while TorBox is still downloading it. Adds the torrent to the TorBox account (one already there
+// is found in the list), picks the file Torrentio meant (by name, else its index, else the biggest video) and asks
+// for its link. Only for the stick: the route spends the account, so it needs the secret PLAY_TOKEN, which the app
+// keeps in its private storage (lampa-native/set-play-token.sh). Links expire: never cached.
+const TORBOX_API = 'https://api.torbox.app/v1/api/torrents/';
+const VIDEO = /\.(mkv|mp4|m4v|avi|mov|webm|ts|m2ts|wmv)$/i;
+
+function sameSecret(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i); // no early exit: constant time
+  return diff === 0;
+}
+
+async function torboxApi(env, path, init = {}) {
+  const res = await fetch(TORBOX_API + path, { ...init, headers: { Authorization: `Bearer ${env.TORBOX_API_KEY}` } });
+  if (!res.ok && res.status >= 500) throw new Error(`TorBox ${res.status}`);
+  return res.json();
+}
+
+async function resumePoint(env, tl) {
+  if (!tl || !env.DB) return { time: 0, percent: 0 };
+  try {
+    const t = await env.DB.prepare('SELECT time, percent FROM timeline WHERE hash = ?').bind(tl).first();
+    return { time: t?.time ?? 0, percent: t?.percent ?? 0 };
+  } catch {
+    return { time: 0, percent: 0 }; // no resume point beats no film
+  }
+}
+
+async function play(request, env, hash) {
+  if (!sameSecret(request.headers.get('X-Play-Token'), env.PLAY_TOKEN)) return corsError(request, 'Forbidden.', 403);
+  const q = new URL(request.url).searchParams;
+  const fileIdx = Number(q.get('file') ?? -1);
+  const name = q.get('name') || '';
+  const resume = resumePoint(env, q.get('tl')); // alongside TorBox's three calls
+  try {
+    const form = new FormData();
+    form.append('magnet', `magnet:?xt=urn:btih:${hash}`);
+    const added = await torboxApi(env, 'createtorrent', { method: 'POST', body: form });
+    let id = added?.data?.torrent_id ?? added?.data?.id;
+    if (id === undefined) { // already in the account (or refused): look for it there
+      const all = await torboxApi(env, 'mylist?bypass_cache=true');
+      id = (all?.data || []).find((t) => String(t.hash).toLowerCase() === hash)?.id;
+    }
+    if (id === undefined) return corsError(request, added?.detail || added?.error || 'TorBox refused it.', 502);
+    const t = (await torboxApi(env, `mylist?id=${id}&bypass_cache=true`))?.data;
+    if (!t) return corsError(request, 'TorBox lost it.', 502);
+    if (!t.download_present) {
+      return new Response(JSON.stringify({ progress: Math.round((t.progress || 0) * 100) }), {
+        status: 202, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(request) },
+      });
+    }
+    const files = t.files || [];
+    const file = (name && files.find((f) => f.short_name === name || String(f.name).split('/').pop() === name))
+      || files.find((f) => f.id === fileIdx && VIDEO.test(f.name))
+      || files.filter((f) => VIDEO.test(f.name)).sort((a, b) => b.size - a.size)[0];
+    if (!file) return corsError(request, 'No video in it.', 404);
+    // requestdl takes the key as a parameter (it is built for browser redirects); server to server only
+    const dl = await torboxApi(env, `requestdl?token=${encodeURIComponent(env.TORBOX_API_KEY)}&torrent_id=${id}&file_id=${file.id}`);
+    if (typeof dl?.data !== 'string') return corsError(request, dl?.detail || 'No link.', 502);
+    return new Response(JSON.stringify({ url: dl.data, ...(await resume) }), {
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(request) },
+    });
+  } catch {
+    return corsError(request, 'TorBox unavailable.', 502);
+  }
+}
+
+// GET /timeline -> {timelines: {hash: {time, duration, percent, updated[, card, season, episode]}}}
+// POST /timeline {timelines: [{hash, time, duration, percent[, updated, card, season, episode]}]} -> 204
+// Resume points shared by lampa-native and Lampa (the torbox-en plugin pulls them into Lampa's timeline and pushes
+// its own), in D1 (proxy/timeline.sql), keyed by Lampa's hash of the title (+ season and episode); times in
+// seconds. Per point the newer one wins (updated, ms; stamped here when missing, as from the stick). For the
+// stick (X-Play-Token) and the CUB accounts in CUB_ACCOUNTS (checked with CUB, as /grades): one household's.
+async function timelineAllowed(request, env) {
+  return sameSecret(request.headers.get('X-Play-Token'), env.PLAY_TOKEN) || Boolean(await cubUser(request, env));
+}
+
+async function timeline(request, env) {
+  if (!(await timelineAllowed(request, env))) return corsError(request, 'Forbidden.', 403);
+  const json = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(request) };
+  if (request.method === 'GET') {
+    const { results } = await env.DB.prepare('SELECT * FROM timeline').all();
+    const timelines = {};
+    for (const { hash, card, season, episode, ...t } of results) {
+      timelines[hash] = card ? { ...t, card, ...(season ? { season, episode } : {}) } : t;
+    }
+    return new Response(JSON.stringify({ timelines }), { headers: json });
+  }
+  const list = (await request.json().catch(() => ({}))).timelines;
+  const ok = (t) => /^\d{1,10}$/.test(String(t?.hash)) && ['time', 'duration', 'percent'].every((k) => Number.isFinite(t[k]))
+    && (t.updated === undefined || Number.isFinite(t.updated));
+  if (!Array.isArray(list) || list.length > 2000 || !list.every(ok)) return corsError(request, 'Bad timeline.', 400);
+  const now = Date.now();
+  const int = (v) => (Number.isInteger(v) && v > 0 ? v : null);
+  const rows = list.map((t) => ({
+    hash: String(t.hash), time: Math.round(t.time), duration: Math.round(t.duration), percent: Math.round(t.percent),
+    updated: Math.round(t.updated ?? now), card: /^(movie|tv)_\d+$/.test(t.card) ? t.card : null,
+    season: int(t.season), episode: int(t.episode),
+  }));
+  // One query for any number of points (D1's free plan allows 50 queries per request): the rows as one JSON.
+  await env.DB.prepare(`INSERT INTO timeline (hash, time, duration, percent, updated, card, season, episode)
+    SELECT value->>'hash', value->>'time', value->>'duration', value->>'percent', value->>'updated', value->>'card',
+      value->>'season', value->>'episode' FROM json_each(?) WHERE true
+    ON CONFLICT (hash) DO UPDATE SET time = excluded.time, duration = excluded.duration, percent = excluded.percent,
+      updated = excluded.updated, card = COALESCE(excluded.card, card), season = COALESCE(excluded.season, season),
+      episode = COALESCE(excluded.episode, episode)
+    WHERE excluded.updated > timeline.updated`).bind(JSON.stringify(rows)).run();
+  return new Response(null, { status: 204, headers: corsHeaders(request) });
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') {
@@ -383,6 +497,10 @@ export default {
     if (src && request.method === 'GET' && (src[1] === 'series') === Boolean(src[3])) {
       return sources(request, env, src[1], src[2], src[3], src[4]);
     }
+
+    const link = new URL(request.url).pathname.match(/^\/play\/([0-9a-f]{40})$/);
+    if (link && request.method === 'GET') return play(request, env, link[1]);
+    if (new URL(request.url).pathname === '/timeline') return timeline(request, env);
 
     const scores = new URL(request.url).pathname.match(/^\/mdblist\/(movie|show)(?:\/(\d+))?$/);
     if (scores && (scores[2] || request.method === 'POST')) return mdblist(request, env, scores[1], scores[2]);
