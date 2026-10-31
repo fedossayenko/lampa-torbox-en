@@ -449,9 +449,9 @@ async function ownIntros(request, env, eps, now) {
   const own = new Map();
   if (!env.DB || !/^[0-9a-f]{40}$/.test(hash) || !eps.length) return own;
   try {
-    const rows = (await env.DB.prepare('SELECT key, start_ms, end_ms FROM intros WHERE key IN (SELECT value FROM json_each(?))')
+    const rows = (await env.DB.prepare('SELECT key, start_ms, end_ms, recap_ms FROM intros WHERE key IN (SELECT value FROM json_each(?))')
       .bind(JSON.stringify(eps.map(([s, e]) => `${hash}/${s}/${e}`))).all()).results;
-    for (const r of rows) own.set(r.key.split('/').slice(1).join(':'), [r.start_ms, r.end_ms]);
+    for (const r of rows) own.set(r.key.split('/').slice(1).join(':'), [r.start_ms, r.end_ms, r.recap_ms]);
     if (eps.some(([s, e]) => !own.has(`${s}:${e}`)) && q.get('n')) {
       const [s, e] = eps[0];
       await env.DB.prepare(`INSERT INTO intro_jobs (key, file, name, series, t) VALUES (?, ?, ?, ?, ?)
@@ -463,18 +463,19 @@ async function ownIntros(request, env, eps, now) {
 }
 
 // "intro:0-84000;credits:3390000-" with our own intro [31800, 113900] -> "intro:31800-113900;credits:3390000-": theirs
-// (and a recap overlapping ours) dropped
+// (and a recap overlapping ours) dropped. With our recap ([31800, 113900, 31800]: "Previously on…" in the release's
+// subtitles, from 0 to the intro) -> "recap:0-31800;intro:31800-113900;credits:3390000-", theirs dropped.
 function withOwnIntro(value, intro) {
   if (!intro?.[1]) return value; // [0, 0]: the detector found none (a finale's own opening), theirs then
-  const [start, end] = intro;
-  const rest = value.split(';').filter((p) => p && !p.startsWith('intro:') && !(p.startsWith('recap:')
-    && Number(p.slice(6).split('-')[0]) < end && Number(p.slice(6).split('-')[1]) > start));
-  return [`intro:${start}-${end}`, ...rest].join(';');
+  const [start, end, recap] = intro;
+  const rest = value.split(';').filter((p) => p && !p.startsWith('intro:') && !(p.startsWith('recap:') && (recap
+    || Number(p.slice(6).split('-')[0]) < end && Number(p.slice(6).split('-')[1]) > start)));
+  return [...recap ? [`recap:0-${recap}`] : [], `intro:${start}-${end}`, ...rest].join(';');
 }
 
 // GET /segments/jobs -> {jobs: [{key: "<hash>/<season>/<episode>", file, name, series, have: ["1:9", …]}]}, the
-// oldest 5; POST /segments/own {intros: [{hash, season, episode, start, end}] (ms; 0-0 when none found, so the
-// episode isn't queued again), done: [<job key>]} -> 204.
+// oldest 5; POST /segments/own {intros: [{hash, season, episode, start, end, recap?}] (ms; 0-0 when none found, so the
+// episode isn't queued again; recap: a recap's end, from 0, at most the intro's start), done: [<job key>]} -> 204.
 // The detector's (X-Play-Token).
 async function introJobs(request, env) {
   if (!sameSecret(request.headers.get('X-Play-Token'), env.PLAY_TOKEN)) return corsError(request, 'Forbidden.', 403);
@@ -491,10 +492,11 @@ async function introJobs(request, env) {
   const intros = (Array.isArray(body.intros) ? body.intros : []).filter((x) => /^[0-9a-f]{40}$/.test(x.hash)
     && [x.season, x.episode, x.start, x.end].every(Number.isInteger) && x.start >= 0 && (x.end > x.start || x.end === 0));
   if (intros.length) {
-    await env.DB.prepare(`INSERT INTO intros (key, start_ms, end_ms, t) SELECT j.value->>'k', j.value->>'s', j.value->>'e', ?
-      FROM json_each(?) AS j WHERE true ON CONFLICT (key) DO UPDATE SET start_ms = excluded.start_ms, end_ms = excluded.end_ms,
-      t = excluded.t`).bind(Date.now(), JSON.stringify(intros.map((x) => ({
-      k: `${x.hash}/${x.season}/${x.episode}`, s: x.start, e: x.end })))).run();
+    await env.DB.prepare(`INSERT INTO intros (key, start_ms, end_ms, recap_ms, t) SELECT j.value->>'k', j.value->>'s',
+      j.value->>'e', j.value->>'r', ? FROM json_each(?) AS j WHERE true ON CONFLICT (key) DO UPDATE SET
+      start_ms = excluded.start_ms, end_ms = excluded.end_ms, recap_ms = excluded.recap_ms, t = excluded.t`)
+      .bind(Date.now(), JSON.stringify(intros.map((x) => ({ k: `${x.hash}/${x.season}/${x.episode}`, s: x.start, e: x.end,
+        r: Number.isInteger(x.recap) && x.recap > 0 && x.recap <= x.start ? x.recap : null })))).run();
   }
   const done = (Array.isArray(body.done) ? body.done : []).filter((k) => typeof k === 'string');
   if (done.length) {

@@ -904,14 +904,16 @@ test('segments: our own intro for the release played wins; episodes without one 
   const own = (body, token = stick) => worker.fetch(new Request('https://w/segments/own', {
     method: 'POST', headers: { ...token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }), skipEnv);
   assert.equal((await own({ intros: [] }, {})).status, 403);
-  assert.equal((await own({ intros: [{ hash: H, season: 1, episode: 9, start: 31800, end: 113900 },
+  assert.equal((await own({ intros: [{ hash: H, season: 1, episode: 9, start: 31800, end: 113900, recap: 31800 },
+    { hash: H, season: 1, episode: 8, start: 20000, end: 100000, recap: 25000 }, // a recap past the intro: none
     { hash: H, season: 1, episode: 10, start: 0, end: 0 }, { hash: H, season: 1, episode: 1, start: 5, end: 5 },
     { hash: 'x', season: 1, episode: 1, start: 0, end: 1 }],
     done: [`${H}/1/9`] })).status, 204);
   assert.equal(skipEnv.DB.raw.prepare('SELECT count(*) n FROM intro_jobs').get().n, 0);
   skipAnswers(foundation);
-  assert.deepEqual(await (await asks('')).json(), { '1:9': 'intro:31800-113900;credits:3395489-' });
-  assert.equal(skipEnv.DB.raw.prepare('SELECT count(*) n FROM intros').get().n, 2, 'E9 and E10\'s none; not 5-5');
+  assert.deepEqual(await (await asks('')).json(), { '1:9': 'recap:0-31800;intro:31800-113900;credits:3395489-' });
+  assert.equal(skipEnv.DB.raw.prepare('SELECT count(*) n FROM intros').get().n, 3, 'E8, E9 and E10\'s none; not 5-5');
+  assert.equal(skipEnv.DB.raw.prepare(`SELECT recap_ms FROM intros WHERE key = '${H}/1/8'`).get().recap_ms, null);
   assert.equal(skipEnv.DB.raw.prepare('SELECT count(*) n FROM intro_jobs').get().n, 0, 'nothing left to find');
   // another release of the same episodes: the community's again
   assert.deepEqual(await (await skip(`tv/93740/tt0804484?e=1:9&h=${'cd'.repeat(20)}`)).json(), { '1:9': 'intro:0-58867;credits:3395489-' });

@@ -9,13 +9,16 @@ CREATE TABLE IF NOT EXISTS segments (
 );
 
 -- Our own intro times per release and episode (key "<torrent hash>/<season>/<episode>", ms), found by lampa-native's
--- tools/intro-detect.py on the old MacBook; they beat the community's. And its queue: a release's episode to start from.
+-- tools/intro-detect.py on the old MacBook; they beat the community's. recap_ms: a recap from 0 ("Previously on…" in the
+-- release's subtitles) ends there. And its queue: a release's episode to start from.
 CREATE TABLE IF NOT EXISTS intros (
   key TEXT PRIMARY KEY,
   start_ms INTEGER NOT NULL,
   end_ms INTEGER NOT NULL,
-  t INTEGER NOT NULL
+  t INTEGER NOT NULL,
+  recap_ms INTEGER
 );
+-- added 2026-10-31 to the live table with: ALTER TABLE intros ADD COLUMN recap_ms INTEGER
 CREATE TABLE IF NOT EXISTS intro_jobs (
   key TEXT PRIMARY KEY,
   file INTEGER NOT NULL,
