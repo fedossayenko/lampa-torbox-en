@@ -824,6 +824,20 @@ test('mine/book and mine/unbook: My list is CUB\'s Bookmarks (Later too, when re
   assert.deepEqual(rows.map(([t]) => t), ['My list']);
 });
 
+test('mine: My list leaves out films you finished (90 %) or marked Watched it; series stay', async () => {
+  const e = mineEnv();
+  e.DB.raw.prepare('INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, 1, 2, 95, 1)').run(lampaHashOf('Seen'));
+  e.DB.raw.prepare('INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, 1, 2, 50, 1)').run(lampaHashOf('Half'));
+  const film = (id, original) => ({ id, title: original, original_title: original, poster_path: `/${id}.jpg` });
+  cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([
+    bm(1, 'book', 'movie', 1, film(1, 'Seen')), bm(2, 'book', 'movie', 2, film(2, 'Half')), bm(3, 'wath', 'movie', 3, film(3, 'Marked')),
+    bm(4, 'viewed', 'movie', 4, film(3, 'Marked')), bm(5, 'book', 'tv', 5, { id: 9, name: 'Show', poster_path: '/9.jpg' }),
+  ]) });
+  const { rows, mylist } = await (await getMine(e)).json();
+  assert.deepEqual(rows.find(([t]) => t === 'My list')[1].map((c) => c[0]), [9, 2]);
+  assert.deepEqual(mylist.sort(), ['movie_1', 'movie_2', 'movie_3', 'tv_9'], 'still in it: ⋯ can remove them');
+});
+
 test('cron at 04 UTC: New in 4K from CUB\'s 4K list, well-known ones, each kept from its first day; /mine shows the unseen', async () => {
   const e = { ...mineEnv(), GRADES: { get: async () => ({ movie_3: { g: 1, t: 1 } }) } };
   const list = { movie: [[1, 500, null], [2, 20, null], [3, 300, 6.1], [4, 10, 7.4], [5, 200, null]], tv: [[9, 150, 7.9]] };

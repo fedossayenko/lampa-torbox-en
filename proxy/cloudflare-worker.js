@@ -1152,7 +1152,11 @@ async function mine(request, env) {
   const isNew = (h) => h.type === 'tv' && `tv_${h.card.id}` in fresh;
   const continuing = [...followed.filter(isNew), ...history.filter((h) => going(h) && !isNew(h))].slice(0, 19);
   // English cards: a series' from shows, the others from the search index or TMDB (15 a request at most)
-  const lists = [['Continue browsing', continuing], ['My list', mylist], ['Finish later', later], ['Rate what you watched', rate]];
+  // My list without the films you finished (90 %, here or in Lampa) or marked Watched it (user 2026-10-31): hidden,
+  // not removed from CUB (Lampa's Bookmarks keep them; ⋯ removes); series stay, a new season may come
+  const finished = (h) => marks[`${h.type}_${h.card.id}`] === 'viewed' || (h.type === 'movie' && done.get(hash(h.card))?.percent >= 90);
+  const lists = [['Continue browsing', continuing], ['My list', mylist.filter((h) => !finished(h))], ['Finish later', later],
+    ['Rate what you watched', rate]];
   const rest = [...new Map(lists.flatMap(([, l]) => l).filter((h) => !(h.type === 'tv' && info.has(Number(h.card.id))))
     .map((h) => [`${h.type}:${h.card.id}`, h])).values()];
   const english = await englishCards(env, rest.map((h) => [h.type, Number(h.card.id)]), rest.map((h) => cardOf(h.card, h.type)), 15);
