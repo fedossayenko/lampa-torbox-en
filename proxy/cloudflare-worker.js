@@ -1095,7 +1095,10 @@ async function mine(request, env) {
   const byTime = (a, b) => (Number(b.time) || 0) - (Number(a.time) || 0);
   const newest = (...types) => dump.bookmarks.filter((b) => types.includes(b.type) && /^(movie|tv)$/.test(b.card_type)).sort(byTime);
   const keyOf = (b) => `${b.card_type}_${b.card_id}`;
-  const once = (list) => [...new Map(list.map((b) => [keyOf(b), b]).reverse()).values()].reverse(); // the newest of each
+  const once = (list) => { // each film once, where it first comes
+    const seen = new Set();
+    return list.filter((b) => !seen.has(keyOf(b)) && seen.add(keyOf(b)));
+  };
   const markOf = (b) => marks[keyOf(b)];
   const all = newest('history');
   const recent = all.slice(0, 100).map((b) => (AWAY.has(markOf(b)) ? { ...parsed(b), away: true } : parsed(b)))
