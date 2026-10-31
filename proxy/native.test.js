@@ -919,8 +919,10 @@ test('play ?probe: links that mark nothing watched, and /stream answers them', a
   torbox({ ...ready, 'mylist?id': { success: true, data: season } });
   const e = seasonEnv();
   const res = await series(e, 'file=1&name=Foundation.S01E09.mkv&series=Foundation&probe=1');
-  assert.ok(res.playlist[1][4].startsWith('https://w/stream/11/5?tl=&prev=&sig='), res.playlist[1][4]);
+  assert.deepEqual(res.playlist.map(([s, ep]) => [s, ep]).slice(-3), [[1, 9], [1, 10], [2, 1]], 'the whole torrent');
+  const e10 = res.playlist.find(([s, ep]) => s === 1 && ep === 10)[4];
+  assert.ok(e10.startsWith('https://w/stream/11/5?tl=&prev=&sig='), e10);
   torbox(ready);
-  assert.equal((await worker.fetch(new Request(res.playlist[1][4]), e)).status, 302);
+  assert.equal((await worker.fetch(new Request(e10), e)).status, 302);
   assert.equal(e.DB.raw.prepare('SELECT count(*) n FROM timeline').get().n, 0);
 });
