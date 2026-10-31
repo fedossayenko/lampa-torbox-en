@@ -381,6 +381,7 @@ function d1() {
   db.exec(readFileSync(new URL('./timeline.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./titles.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./shows.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('./fresh.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./marks.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./segments.sql', import.meta.url), 'utf8'));
   const stmt = (sql, args = []) => ({
@@ -696,6 +697,60 @@ test('mine: Rate what you watched = the history played past 70 % (a series: any 
   assert.deepEqual(grades, { movie_603: 2, movie_10: 'skip' }, 'removed ones left out');
 });
 
+test('mine: a new episode out with RU/UA audio goes first in Continue browsing, named in "new"', async () => {
+  const e = mineEnv();
+  const ago = (days) => Date.now() - days * 86400e3;
+  const day = (days) => new Date(ago(days)).toISOString().slice(0, 10);
+  const watched = (key, days) => e.DB.raw.prepare(
+    'INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, 1, 2, 95, ?)').run(lampaHashOf(key), ago(days));
+  watched('34Foundation', 11); // up to date: E5, the last aired, came after
+  watched('19Dark Matter', 500); // its season 2 began after
+  watched('13Peaky Blinders', 30); // behind: season 2 long out
+  watched('11Severance', 30); // up to date: E2 not aired yet
+  watched('37Euphoria', 160); // E8 came after, but 150 days ago
+  watched("11Widow's Bay", 20); // E2-E10 since: E2's own date unknown
+  const show = (id, name, imdb, seasons, last, aired) => ({ id, name, original_name: name, poster_path: `/${id}.jpg`,
+    external_ids: { imdb_id: imdb }, seasons: [{ season_number: 0, episode_count: 3, air_date: '2020-01-01' },
+      ...seasons.map(([n, count, air]) => ({ season_number: n, episode_count: count, air_date: air }))],
+    last_episode_to_air: { season_number: last[0], episode_number: last[1], air_date: aired } });
+  const ru = { streams: [{ infoHash: 'a'.repeat(40), title: 'Foundation.S03E05.2160p\n👤 50 💾 5 GB ⚙️ rutor\n🇷🇺 / 🇬🇧' }] };
+  const en = { streams: [{ infoHash: 'b'.repeat(40), title: 'Dark.Matter.S02E01.1080p\n👤 900 💾 2 GB ⚙️ TGx' }] };
+  const answers = {
+    'users/get': { user: { id: 42 } },
+    'bookmarks/dump': cubDump([
+      bm(1, 'history', 'tv', 1, { id: 93740, name: 'Основание' }), bm(2, 'history', 'tv', 2, { id: 196322, name: 'Тёмная материя' }),
+      bm(3, 'history', 'tv', 3, { id: 60574, name: 'Острые козырьки' }), bm(4, 'history', 'tv', 4, { id: 95396, name: 'Разделение' }),
+      bm(5, 'history', 'tv', 5, { id: 85552, name: 'Эйфория' }), bm(6, 'history', 'tv', 6, { id: 270476, name: 'Залив вдов' }),
+    ]),
+    'tv/93740': show(93740, 'Foundation', 'tt0804484', [[1, 10, '2021-09-23'], [2, 10, '2023-07-14'], [3, 10, day(60)]],
+      [3, 5], day(7)),
+    'tv/196322': show(196322, 'Dark Matter', 'tt12688584', [[1, 9, '2024-05-08'], [2, 10, day(2)]], [2, 1], day(2)),
+    'tv/60574': show(60574, 'Peaky Blinders', 'tt2442560', [[1, 6, '2013-09-12'], [2, 6, '2014-10-02']], [2, 6], '2014-11-06'),
+    'tv/95396': show(95396, 'Severance', 'tt11280740', [[1, 9, day(40)]], [1, 1], day(40)),
+    'tv/85552': show(85552, 'Euphoria', 'tt8772296', [[3, 8, day(200)]], [3, 8], day(150)),
+    'tv/270476': show(270476, "Widow's Bay", 'tt1', [[1, 10, day(60)]], [1, 10], day(5)),
+    '/stream/series/tt0804484:3:5.json': ru,
+    '/stream/series/tt12688584:2:1.json': en,
+  };
+  cub(answers);
+  const first = await (await getMine(e)).json();
+  assert.deepEqual(first.rows[0][1].map((c) => c[2]), ["Foundation", "Widow's Bay", 'Euphoria', 'Peaky Blinders',
+    'Dark Matter'], 'Severance: watched to its last aired');
+  assert.deepEqual(first.new, { tv_93740: 'S3 E5' }, 'Dark Matter S2 E1: English only so far');
+  assert.deepEqual(asked.filter((u) => u.includes('torrentio')).sort(),
+    ['torrentio.strem.fun/stream/series/tt0804484:3:5.json', 'torrentio.strem.fun/stream/series/tt12688584:2:1.json']);
+  cub(answers);
+  const again = await (await getMine(e)).json();
+  assert.deepEqual(again.new, { tv_93740: 'S3 E5' });
+  assert.ok(!asked.some((u) => u.includes('torrentio')), 'out: kept; not out: asked again in 3 hours');
+  e.DB.raw.prepare('UPDATE fresh SET t = 0').run();
+  cub({ ...answers, '/stream/series/tt12688584:2:1.json': { streams: [{ ...en.streams[0], title: en.streams[0].title + '\n🇺🇦' }] } });
+  assert.deepEqual((await (await getMine(e)).json()).new, { tv_93740: 'S3 E5', tv_196322: 'S2 E1' });
+  e.DB.raw.prepare('UPDATE fresh SET t = 0, out = NULL').run();
+  cub({ ...answers, '/stream/series/tt0804484:3:5.json': undefined });
+  assert.deepEqual((await (await getMine(e)).json()).new, {}, 'Torrentio down: no label');
+});
+
 test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502; nothing to continue → no row', async () => {
   const e = mineEnv();
   cub({ 'users/get': { user: { id: 9 } } });
@@ -704,7 +759,7 @@ test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502;
   cub({ 'users/get': { user: { id: 42 } } });
   assert.equal((await getMine(e)).status, 502);
   cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]) });
-  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {} });
+  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {}, new: {} });
 });
 
 test('mine/history: a film played on the stick goes to the front of Lampa\'s history as Lampa\'s card; again: moved', async () => {

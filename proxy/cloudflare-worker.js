@@ -873,31 +873,87 @@ async function englishCards(env, wanted, fallback, fetchMax = 20) {
 
 // Series' last aired episode ("season:episode"), original name (Lampa's keys) and English card, from TMDB, kept a
 // day in D1 (shows.sql): a series leaves Continue browsing once that episode is watched (Carrie, user 2026-10-31)
-// and comes back when a new one airs. At most SHOW_FETCH asked of TMDB a request (the free plan's 50 subrequests);
-// the others on the next asks. ids in, id → {original, last, card} out.
+// and comes back when a new one airs; also its IMDb id, seasons and air dates, for new episodes. At most SHOW_FETCH
+// asked of TMDB a request (the free plan's 50 subrequests); the others on the next asks. ids in, id → {original,
+// last, card, imdb, seasons, aired} out (shows.sql).
 const SHOW_TTL = 86400e3;
 const SHOW_FETCH = 15;
 async function shows(env, ids) {
   const now = Date.now();
   const have = new Map(env.DB && ids.length ? (await env.DB.prepare(
-    'SELECT id, original, last, card, t FROM shows WHERE id IN (SELECT value FROM json_each(?))')
+    'SELECT id, original, last, card, t, imdb, seasons, aired FROM shows WHERE id IN (SELECT value FROM json_each(?))')
     .bind(JSON.stringify(ids)).all().then((r) => r.results).catch(() => [])).map((r) => [r.id, r]) : []);
-  const stale = ids.filter((id) => !have.has(id) || now - have.get(id).t > SHOW_TTL).slice(0, SHOW_FETCH);
-  const got = (await Promise.all(stale.map((id) => tmdb(env, `tv/${id}`).then((res) => (res.ok ? res.json() : null))
+  const stale = ids.filter((id) => !have.has(id) || now - have.get(id).t > SHOW_TTL || have.get(id).seasons == null)
+    .slice(0, SHOW_FETCH);
+  const got = (await Promise.all(stale.map((id) => tmdb(env, `tv/${id}`, '&append_to_response=external_ids')
+    .then((res) => (res.ok ? res.json() : null))
     .catch(() => null)))).filter((m) => m && m.id && m.poster_path);
   const rows = got.map((m) => {
     const l = m.last_episode_to_air;
     return { id: m.id, original: m.original_name || m.name || '', last: l ? `${l.season_number}:${l.episode_number}` : '',
-      card: JSON.stringify(cardOf(m, 'tv')), t: now };
+      card: JSON.stringify(cardOf(m, 'tv')), t: now, imdb: m.external_ids?.imdb_id || null, aired: l?.air_date || null,
+      seasons: JSON.stringify((m.seasons || []).filter((x) => x.season_number > 0)
+        .map((x) => [x.season_number, x.episode_count || 0, x.air_date || null])) };
   });
   for (const r of rows) have.set(r.id, r);
   if (rows.length && env.DB) {
-    await env.DB.prepare(`INSERT INTO shows (id, original, last, card, t)
-        SELECT value->>'id', value->>'original', value->>'last', value->>'card', value->>'t' FROM json_each(?) WHERE true
-        ON CONFLICT (id) DO UPDATE SET original = excluded.original, last = excluded.last, card = excluded.card, t = excluded.t`)
+    await env.DB.prepare(`INSERT INTO shows (id, original, last, card, t, imdb, seasons, aired)
+        SELECT value->>'id', value->>'original', value->>'last', value->>'card', value->>'t', value->>'imdb',
+          value->>'seasons', value->>'aired' FROM json_each(?) WHERE true
+        ON CONFLICT (id) DO UPDATE SET original = excluded.original, last = excluded.last, card = excluded.card,
+          t = excluded.t, imdb = excluded.imdb, seasons = excluded.seasons, aired = excluded.aired`)
       .bind(JSON.stringify(rows)).run().catch(() => {}); // asked again next time
   }
   return have;
+}
+
+// New episodes (user 2026-10-31): the episode after your furthest watched one aired in the last NEW_DAYS, after you
+// watched that one: [season, episode], else null. s: shows(); done: the timeline's points past 70 % by hash.
+// ponytail: an air date is known for a season's first episode and the last aired one only (TMDB's series answer),
+// so with two or more aired since (a week missed) there is no label until you catch up; upgrade: TMDB's
+// tv/<id>/season/<n> for the episode's own date.
+const NEW_DAYS = 30;
+function nextNew(s, done, now) {
+  const seasons = JSON.parse(s.seasons || '[]');
+  const [ls, le] = s.last.split(':').map(Number);
+  let w = null; // the furthest watched: [season, episode, when]
+  for (const [n, count] of seasons) {
+    for (let e = 1; e <= count && (n < ls || (n === ls && e <= le)); e++) {
+      const p = done.get(episodeKey([n, e], s.original));
+      if (p && p.percent >= 90) w = [n, e, p.updated];
+    }
+  }
+  if (!w) return null;
+  const next = w[1] < (seasons.find(([n]) => n === w[0])?.[1] || 0) ? [w[0], w[1] + 1] : [w[0] + 1, 1];
+  if (next[0] > ls || (next[0] === ls && next[1] > le)) return null; // not aired yet
+  const aired = Date.parse(next[1] === 1 ? seasons.find(([n]) => n === next[0])?.[2]
+    : next[0] === ls && next[1] === le ? s.aired : null);
+  return aired > w[2] && now - aired <= NEW_DAYS * 86400e3 ? next : null;
+}
+
+// Which of those new episodes are out with Russian or Ukrainian audio (the app's default languages; a dub comes days
+// after the air date): Torrentio's flags, asked at most every FRESH_EVERY per episode until it is (fresh.sql), up
+// to FRESH_MAX a request; its failures are asked again next time. [{key, imdb, next}] in, the keys out.
+const FRESH_EVERY = 3 * 3600e3;
+const FRESH_MAX = 5;
+async function freshOut(env, list) {
+  if (!env.DB || !list.length) return new Set();
+  const now = Date.now();
+  const rows = new Map((await env.DB.prepare('SELECT key, out, t FROM fresh WHERE key IN (SELECT value FROM json_each(?))')
+    .bind(JSON.stringify(list.map((x) => x.key))).all().then((r) => r.results).catch(() => [])).map((r) => [r.key, r]));
+  const due = list.filter((x) => !rows.get(x.key)?.out && now - (rows.get(x.key)?.t || 0) >= FRESH_EVERY).slice(0, FRESH_MAX);
+  const asked = (await Promise.all(due.map(({ key, imdb, next }) => fetch(
+    `https://torrentio.strem.fun/stream/series/${imdb}:${next[0]}:${next[1]}.json`, { signal: AbortSignal.timeout(5000) })
+    .then((res) => (res.ok ? res.json() : null))
+    .then((j) => j && { key, out: (j.streams || []).some((st) => /🇷🇺|🇺🇦/u.test(String(st.title))) ? now : null, t: now })
+    .catch(() => null)))).filter(Boolean);
+  if (asked.length) {
+    await env.DB.prepare(`INSERT INTO fresh (key, out, t) SELECT value->>'key', value->>'out', value->>'t'
+      FROM json_each(?) WHERE true ON CONFLICT (key) DO UPDATE SET out = excluded.out, t = excluded.t`)
+      .bind(JSON.stringify(asked)).run().catch(() => {}); // asked again next time
+  }
+  for (const a of asked) rows.set(a.key, a);
+  return new Set(list.filter((x) => rows.get(x.key)?.out).map((x) => x.key));
 }
 
 // Lampa's marks (favorite.js; one at a time): Looking, Viewed, Scheduled, To be continued, Thrown. The app's Finish
@@ -909,9 +965,10 @@ const FILM_STARTED_S = 300; // a film in Continue browsing: watched 5 min
 const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 
 // GET /mine with the app's CUB sign-in (X-Cub-Token, X-Cub-Profile; accounts in CUB_ACCOUNTS only, as /grades) ->
-// {"rows": [...] as /home, "marks": {"tv_93740": "scheduled", ...}, "grades": {"movie_603": 2, ...}}: the rows of
-// Lampa's CUB home that are yours, for the top of lampa-native's Home, and every film's mark and grade (the film
-// page's ⋯ and ★ show them; grades: KV GRADES as /grades, "skip" = Didn't watch / not mine).
+// {"rows": [...] as /home, "marks": {"tv_93740": "scheduled", ...}, "grades": {"movie_603": 2, ...}, "new":
+// {"tv_93740": "S3 E5", ...}}: the rows of Lampa's CUB home that are yours, for the top of lampa-native's Home,
+// every film's mark and grade (the film page's ⋯ and ★ show them; grades: KV GRADES as /grades, "skip" = Didn't
+// watch / not mine), and the series with a new episode out (nextNew, freshOut): first in Continue browsing.
 // Continue browsing: Lampa's (favorite.js continues): the series in the history, newest first, 19 at most; here
 // also the films being watched (5 min in, under 90 %: the timeline; shorter is a try of a release, its sound or a
 // test: user 2026-10-31; their film page still resumes from 10 s), which Lampa's main screen leaves out. Out of it:
@@ -970,8 +1027,8 @@ async function mine(request, env) {
   };
   // ponytail: every point past 70 % read (~300 in 2026-10, one small query); a series' episodes hashed up to its
   // seasons (30 when CUB's card doesn't say) × 30 episodes, as grades-patch.js scans them
-  const done = new Set(env.DB ? (await env.DB.prepare('SELECT hash FROM timeline WHERE percent >= 70').all()
-    .then((r) => r.results).catch(() => [])).map((p) => p.hash) : []);
+  const done = new Map(env.DB ? (await env.DB.prepare('SELECT hash, percent, updated FROM timeline WHERE percent >= 70')
+    .all().then((r) => r.results).catch(() => [])).map((p) => [p.hash, p]) : []);
   const watched = (h) => {
     if (h.type === 'movie') return done.has(hash(h.card));
     const original = h.card.original_name || h.card.name || '';
@@ -981,8 +1038,18 @@ async function mine(request, env) {
     return false;
   };
   const rate = recent.filter((h) => !(`${h.type}_${h.card.id}` in grades) && watched(h)).slice(0, 20);
+  const continuing = history.filter(going).slice(0, 19);
+  const newOnes = continuing.map((h) => {
+    const s = h.type === 'tv' && info.get(Number(h.card.id));
+    const next = s && s.imdb && s.last ? nextNew(s, done, Date.now()) : null;
+    return next && { h, next, imdb: s.imdb, key: `${h.card.id}/${next[0]}/${next[1]}` };
+  }).filter(Boolean);
+  const out = await freshOut(env, newOnes);
+  const fresh = {};
+  for (const x of newOnes) if (out.has(x.key)) fresh[`tv_${x.h.card.id}`] = `S${x.next[0]} E${x.next[1]}`;
+  const first = (h) => (h.type === 'tv' && `tv_${h.card.id}` in fresh ? 0 : 1);
   const rows = [];
-  for (const [title, list] of [['Continue browsing', history.filter(going).slice(0, 19)], ['Finish later', later],
+  for (const [title, list] of [['Continue browsing', continuing.sort((a, b) => first(a) - first(b))], ['Finish later', later],
     ['Rate what you watched', rate]]) {
     // English: a series' from shows, the others from the search index or TMDB
     const rest = list.filter((h) => !(h.type === 'tv' && info.has(Number(h.card.id))));
@@ -991,7 +1058,7 @@ async function mine(request, env) {
       ? JSON.parse(info.get(Number(h.card.id)).card) : english[rest.indexOf(h)]));
     if (cards.length) rows.push([title, cards]);
   }
-  return new Response(JSON.stringify({ rows, marks, grades }), {
+  return new Response(JSON.stringify({ rows, marks, grades, new: fresh }), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(request) },
   });
 }
