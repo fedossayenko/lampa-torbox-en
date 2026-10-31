@@ -255,6 +255,19 @@ test('sources: each torrent once; Torrentio down → 502', async () => {
   assert.equal((await streams('movie/tt1')).status, 502);
 });
 
+// Torrentio answers the worker 429 (Cloudflare's IPs are shared and rate-limited); the stick's home IP gets it, so
+// the app asks Torrentio itself and posts its answer here: the same filtering, sorting and TorBox check.
+test('sources: Torrentio\'s answer posted by the stick is used as Torrentio\'s own, Torrentio not asked', async () => {
+  tmdbAnswers({ '/v1/api/torrents/checkcached': { success: true, data: [{ hash: hash(4) }] } });
+  const post = (path, body) => worker.fetch(new Request('https://w/streams/' + path, { method: 'POST', body }), streamsEnv);
+  const body = await (await post('movie/tt1?lang=RU,UA', JSON.stringify(fifteen['/stream/movie/tt1.json']))).json();
+  assert.deepEqual(body.streams.map((r) => r[0]), ruUa.slice(0, 6).map(hash));
+  assert.deepEqual(body.streams.map((r) => r[8]), [1, 0, 0, 0, 0, 0]);
+  assert.ok(!asked.some((u) => u.includes('torrentio')));
+  assert.equal((await post('movie/tt1', 'not json')).status, 400);
+  assert.equal((await post('movie/tt1', 'x'.repeat(4e6 + 1))).status, 413);
+});
+
 // Badges from Torrentio's quality line, the torrent name and the file name. Real names from Dune: Part Two's list.
 test('badges: resolution, Dolby Vision, HDR, REMUX, codec, audio; in that order, each once', async () => {
   const row = (name, title, filename) => ({ name, title: `${title}\n👤 1 💾 1 GB ⚙️ x`, infoHash: hash(1),
@@ -363,6 +376,7 @@ import { readFileSync } from 'node:fs';
 function d1() {
   const db = new DatabaseSync(':memory:');
   db.exec(readFileSync(new URL('./timeline.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('./titles.sql', import.meta.url), 'utf8'));
   const stmt = (sql, args = []) => ({
     bind: (...a) => stmt(sql, a),
     all: async () => ({ results: db.prepare(sql).all(...args) }),
@@ -410,6 +424,15 @@ test('timeline: Lampa pushes its own (with its stamps, episodes keep season and 
   assert.deepEqual(timelines['2'], { time: 900, duration: 2400, percent: 38, updated: 3000, card: 'tv_1399', season: 1, episode: 5 });
 });
 
+test("timeline: ?hash= gives only those points (one series's episodes, for the stick)", async () => {
+  torbox(ready);
+  const e = tlEnv();
+  await postTimeline(e, ['1', '2', '3'].map((hash) => ({ hash, time: 100, duration: 1000, percent: 10 })));
+  const only = (q) => worker.fetch(new Request(`https://w/timeline?hash=${q}`, { headers: stick }), e).then((r) => r.json());
+  assert.deepEqual(Object.keys((await only('3,1,9')).timelines).sort(), ['1', '3']);
+  assert.deepEqual((await only('9')).timelines, {});
+});
+
 test('timeline: only the stick or an allowed CUB account; bad points are refused; no point → play from the start', async () => {
   torbox({ ...ready, '/api/users/get': { user: { id: 9 } } });
   const e = tlEnv();
@@ -423,4 +446,125 @@ test('timeline: only the stick or an allowed CUB account; bad points are refused
   torbox(ready);
   assert.deepEqual(await (await worker.fetch(new Request(`https://w/play/${H}?file=1&tl=5`, { headers: stick }), e)).json(),
     { url: 'https://store.torbox.app/dl/xyz', time: 0, percent: 0 });
+});
+
+test('search: films and series with a poster, as Home cards; the query reaches TMDB whole, Cyrillic too', async () => {
+  tmdbAnswers({
+    'search/multi': {
+      results: [
+        { id: 155, media_type: 'movie', title: 'The Dark Knight', release_date: '2008-07-16', poster_path: '/k.jpg',
+          vote_average: 8.5, backdrop_path: '/kb.jpg' },
+        { id: 3, media_type: 'person', name: 'Christian Bale', profile_path: '/a.jpg' },
+        { id: 4, media_type: 'tv', name: 'No poster', poster_path: null },
+      ],
+    },
+  });
+  const res = await worker.fetch(new Request('https://w/search?q=' + encodeURIComponent('тёмный рыцарь & co')), env);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('Cache-Control'), 'max-age=3600');
+  assert.deepEqual((await res.json()).results, [[155, 'movie', 'The Dark Knight', '2008', '/k.jpg', 85, '/kb.jpg']]);
+  const url = new URL(asked[0]);
+  assert.equal(url.searchParams.get('query'), 'тёмный рыцарь & co');
+  assert.equal(url.searchParams.get('include_adult'), 'false');
+});
+
+test('search: an empty query asks nothing', async () => {
+  tmdbAnswers({});
+  const res = await worker.fetch(new Request('https://w/search?q=%20'), env);
+  assert.deepEqual((await res.json()).results, []);
+  assert.equal(asked.length, 0);
+  assert.equal(res.headers.get('Cache-Control'), 'no-store'); // nothing found isn't kept: the index may fill later
+});
+
+// The search index: what the crons store, and what one or two letters find.
+const known = {
+  'discover/movie': { results: [
+    { id: 155, title: 'The Dark Knight', original_title: 'The Dark Knight', release_date: '2008-07-16', poster_path: '/k.jpg',
+      vote_average: 8.5, vote_count: 34000, backdrop_path: '/kb.jpg' },
+    { id: 157336, title: 'Interstellar', original_title: 'Interstellar', release_date: '2014-11-05', poster_path: '/i.jpg',
+      vote_average: 8.4, vote_count: 37000 },
+    { id: 9, title: 'No poster', vote_count: 99999, poster_path: null },
+  ] },
+  'discover/tv': { results: [
+    { id: 1396, name: 'Breaking Bad', original_name: 'Breaking Bad', first_air_date: '2008-01-20', poster_path: '/b.jpg',
+      vote_average: 8.9, vote_count: 16000 },
+    { id: 93405, name: 'Squid Game', original_name: '오징어 게임', first_air_date: '2021-09-17', poster_path: '/s.jpg',
+      vote_average: 7.8, vote_count: 15000 },
+  ] },
+};
+const russian = {
+  'discover/movie': { results: [{ id: 155, title: 'Тёмный рыцарь', poster_path: '/k.jpg' },
+    { id: 777, title: 'Not in the English run', poster_path: '/x.jpg' }] },
+  'discover/tv': { results: [{ id: 1396, name: 'Во все тяжкие', poster_path: '/b.jpg' }] },
+};
+const indexed = async () => {
+  const e = { ...env, DB: d1() };
+  tmdbAnswers(known);
+  await worker.scheduled({ cron: '7 3 * * *' }, e);
+  assert.ok(asked.length <= 45, 'the free plan allows 50 calls a run');
+  assert.ok(asked.every((u) => new URL(u).searchParams.get('language') === 'en-US'));
+  tmdbAnswers(russian);
+  await worker.scheduled({ cron: '37 3 * * *' }, e);
+  assert.ok(asked.every((u) => new URL(u).searchParams.get('language') === 'ru-RU'));
+  return e;
+};
+const find = async (e, q) => {
+  tmdbAnswers({ 'search/multi': { results: [
+    { id: 155, media_type: 'movie', title: 'The Dark Knight', poster_path: '/k.jpg', release_date: '2008-07-16', vote_average: 8.5 },
+    { id: 5, media_type: 'movie', title: 'Inter Nos', poster_path: '/n.jpg', release_date: '1982-01-01', vote_average: 6 },
+  ] } });
+  const res = await worker.fetch(new Request('https://w/search?q=' + encodeURIComponent(q)), e);
+  return (await res.json()).results.map((c) => c[2]);
+};
+
+test('search index: one or two letters find well-known titles by any word, the most voted first, without TMDB', async () => {
+  const e = await indexed();
+  assert.deepEqual(await find(e, 'i'), ['Interstellar']);
+  assert.equal(asked.length, 0, 'too short for TMDB search: the index alone');
+  assert.deepEqual(await find(e, 'b'), ['Breaking Bad']);
+  assert.deepEqual(await find(e, 'т'), ['The Dark Knight', 'Breaking Bad'], 'Тёмный рыцарь, Во все тяжкие');
+  assert.deepEqual(await find(e, 'во'), ['Breaking Bad'], 'Во все тяжкие');
+  assert.deepEqual(await find(e, 'ры'), ['The Dark Knight'], 'any word: рыцарь');
+  assert.deepEqual(await find(e, '오징'), ['Squid Game'], 'the original title');
+  assert.deepEqual(await find(e, 'kn'), ['The Dark Knight']);
+  const rows = e.DB.raw.prepare('SELECT id FROM titles ORDER BY id').all().map((r) => r.id);
+  assert.deepEqual(rows, [155, 1396, 93405, 157336], 'no poster: left out; the Russian run adds no titles');
+});
+
+test('search index: from three letters TMDB search too, after the index, each title once', async () => {
+  const e = await indexed();
+  assert.deepEqual(await find(e, 'inter'), ['Interstellar', 'The Dark Knight', 'Inter Nos']);
+  assert.equal(asked.length, 1);
+  assert.deepEqual(await find(e, 'тёмный р'), ['The Dark Knight', 'Inter Nos'], 'ё as е; two words');
+});
+
+test('search index: a title off every list for a month leaves it', async () => {
+  const e = await indexed();
+  e.DB.raw.prepare('UPDATE titles SET seen = 0 WHERE id = 1396').run();
+  tmdbAnswers({ 'discover/movie': known['discover/movie'] });
+  await worker.scheduled({ cron: '7 3 * * *' }, e);
+  assert.deepEqual(e.DB.raw.prepare('SELECT id FROM titles ORDER BY id').all().map((r) => r.id), [155, 93405, 157336]);
+});
+
+test('film page: kept at the edge a day, so the stick may ask for it ahead (one MDBList lookup a film a day)', async () => {
+  const stored = new Map();
+  globalThis.caches = { default: {
+    match: async (req) => stored.get(req.url)?.clone(),
+    put: async (req, res) => { stored.set(req.url, res); },
+  } };
+  try {
+    tmdbAnswers({ 'movie/7': { title: 'Dune' } });
+    const first = await (await worker.fetch(new Request('https://w/card/movie/7?v=3'), env, { waitUntil: (p) => p }))
+      .json();
+    const calls = asked.length;
+    assert.ok(calls > 0);
+    const again = await (await worker.fetch(new Request('https://w/card/movie/7?v=3'), env)).json();
+    assert.equal(asked.length, calls, 'nothing asked again');
+    assert.deepEqual(again, first);
+    tmdbAnswers({});
+    assert.equal((await worker.fetch(new Request('https://w/card/movie/8?v=3'), env)).status, 502);
+    assert.equal(stored.size, 1, 'a failure is not kept');
+  } finally {
+    delete globalThis.caches;
+  }
 });

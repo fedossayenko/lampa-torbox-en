@@ -152,10 +152,10 @@ const HOME_ROWS = [
   ['Top series', 'tv/top_rated'],
 ];
 
-function tmdb(env, path, query = '') {
+function tmdb(env, path, query = '', language = 'en-US') {
   const key = env.TMDB_API_KEY;
   const v3 = /^[0-9a-f]{32}$/.test(key);
-  const url = `https://api.themoviedb.org/3/${path}?language=en-US${query}${v3 ? `&api_key=${key}` : ''}`;
+  const url = `https://api.themoviedb.org/3/${path}?language=${language}${query}${v3 ? `&api_key=${key}` : ''}`;
   return fetch(url, v3 ? {} : { headers: { Authorization: `Bearer ${key}` } });
 }
 
@@ -164,6 +164,90 @@ function tmdb(env, path, query = '') {
 function cardOf(m, type) {
   return [m.id, type, m.title || m.name || '', (m.release_date || m.first_air_date || '').slice(0, 4),
     m.poster_path, Math.round((m.vote_average || 0) * 10), m.backdrop_path || ''];
+}
+
+// A GET answer kept at this Cloudflare location for its max-age (Cache API): asked again, nothing is fetched. The
+// stick asks for a film's /card ahead, while focus rests on its card: a film costs one MDBList lookup a day.
+async function edgeCached(request, ctx, make) {
+  if (typeof caches === 'undefined') return make(); // node tests without it
+  const hit = await caches.default.match(request);
+  if (hit) return hit;
+  const res = await make();
+  if (res.ok) {
+    const put = caches.default.put(request, res.clone());
+    if (ctx) ctx.waitUntil(put);
+    else await put;
+  }
+  return res;
+}
+
+// lampa-native's search predictions (titles.sql): ~1000 well-known films and series, refreshed daily by two crons
+// because the free plan allows 50 calls a run: English names with the original titles, then the Russian names.
+const TITLE_CRONS = { '7 3 * * *': 'en-US', '37 3 * * *': 'ru-RU' };
+const TITLE_LISTS = [ // [path, query, pages]: 45 calls
+  ['discover/movie', '&sort_by=vote_count.desc', 20], ['discover/tv', '&sort_by=vote_count.desc', 10],
+  ['movie/popular', '', 5], ['tv/popular', '', 5],
+  ['discover/movie', '&sort_by=vote_count.desc&with_original_language=ru', 3],
+  ['discover/tv', '&sort_by=vote_count.desc&with_original_language=ru', 2],
+];
+
+// Search words: lower case, ё as е, letters and digits only, a space on each side: LIKE '% word%' = a word's start.
+const words = (s) => ` ${String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, ' ').trim()} `;
+
+async function refreshTitles(env, language) {
+  const calls = TITLE_LISTS.flatMap(([path, query, pages]) =>
+    Array.from({ length: pages }, (_, i) => [path, `${query}&page=${i + 1}`]));
+  const found = new Map();
+  await Promise.all(calls.map(async ([path, query]) => {
+    try {
+      const res = await tmdb(env, path, query, language);
+      if (!res.ok) return;
+      const type = path.includes('tv') ? 'tv' : 'movie';
+      for (const m of (await res.json()).results || []) if (m.poster_path) found.set(`${type}:${m.id}`, { type, m });
+    } catch {
+      // one page less until tomorrow
+    }
+  }));
+  const rows = [...found.values()];
+  if (language === 'ru-RU') { // Russian names for the titles the English run stored; it adds none
+    await env.DB.prepare(`UPDATE titles SET ru = j.value->>'ru' FROM json_each(?) AS j
+      WHERE titles.type = j.value->>'type' AND titles.id = j.value->>'id'`)
+      .bind(JSON.stringify(rows.map(({ type, m }) => ({ type, id: m.id, ru: words(m.title || m.name) })))).run();
+    return;
+  }
+  const now = Date.now();
+  await env.DB.prepare(`INSERT INTO titles (type, id, card, votes, seen, en)
+      SELECT value->>'type', value->>'id', value->>'card', value->>'votes', ?2, value->>'en' FROM json_each(?1) WHERE true
+      ON CONFLICT (type, id) DO UPDATE SET card = excluded.card, votes = excluded.votes, seen = excluded.seen,
+        en = excluded.en`)
+    .bind(JSON.stringify(rows.map(({ type, m }) => ({ type, id: m.id, card: JSON.stringify(cardOf(m, type)),
+      votes: m.vote_count || 0, en: words(`${m.title || m.name} ${m.original_title || m.original_name || ''}`) }))), now)
+    .run();
+  await env.DB.prepare('DELETE FROM titles WHERE seen < ?').bind(now - 30 * 86400e3).run(); // off every list a month
+}
+
+// GET /search?q=<text> -> lampa-native's search, as Home cards: well-known titles with a word starting so (the
+// index above, most voted first: one letter is enough), then from three letters TMDB's own search, each title once.
+// A Cyrillic query finds the Russian names. An hour in caches (TMDB may have failed); nothing found isn't kept.
+async function search(request, env) {
+  const q = (new URL(request.url).searchParams.get('q') || '').trim().slice(0, 100);
+  const w = words(q).trim();
+  const [known, found] = !w ? [[], []] : await Promise.all([
+    env.DB ? env.DB.prepare(`SELECT card FROM titles WHERE en || ru LIKE ? ORDER BY votes DESC LIMIT ?`)
+      .bind(`% ${w}%`, w.length >= 3 ? 10 : 20).all().then((r) => r.results.map((x) => JSON.parse(x.card)))
+      .catch(() => []) : [],
+    w.length < 3 ? [] : tmdb(env, 'search/multi', `&include_adult=false&query=${encodeURIComponent(q)}`)
+      .then((res) => (res.ok ? res.json() : {})).then((o) => (o.results || [])
+        .filter((m) => (m.media_type === 'movie' || m.media_type === 'tv') && m.poster_path)
+        .map((m) => cardOf(m, m.media_type))).catch(() => []),
+  ]);
+  const seen = new Set();
+  const results = [...known, ...found].filter((c) => !seen.has(`${c[1]}:${c[0]}`) && seen.add(`${c[1]}:${c[0]}`))
+    .slice(0, 20);
+  return new Response(JSON.stringify({ results }), {
+    headers: { 'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': results.length ? 'max-age=3600' : 'no-store', ...corsHeaders(request) },
+  });
 }
 
 async function home(request, env) {
@@ -276,6 +360,9 @@ async function filmCard(request, env, type, id) {
 // only the asked audio languages (none = all), biggest first. TorBox's cache is checked for the first FIRST only
 // (5 rows fit on the stick's screen, measured; +1 half seen) so they come fast; the app asks from=FIRST for the rest.
 // cached: 1 yes, 0 no, -1 unknown (no TORBOX_API_KEY secret, or TorBox down).
+// POST, the same path: Torrentio's answer in the body, from the stick. Torrentio answers here 429 at times
+// (Cloudflare's IPs are shared and rate-limited) while the stick's home IP gets it: the app then asks Torrentio
+// itself and posts that here (≤ 4 MB).
 const FIRST = 6;
 const MAX = 100;
 // One badge per group, the first that matches: resolution, Dolby Vision, HDR, REMUX, codec, audio.
@@ -316,13 +403,25 @@ async function cachedOnTorBox(env, hashes) {
 
 async function sources(request, env, kind, imdb, season, episode) {
   let list;
-  try {
-    const id = kind === 'series' ? `${imdb}:${season}:${episode}` : imdb;
-    const res = await fetch(`https://torrentio.strem.fun/stream/${kind}/${id}.json`);
-    if (!res.ok) throw new Error(String(res.status));
-    list = (await res.json()).streams || [];
-  } catch {
-    return corsError(request, 'Torrentio unavailable.', 502);
+  if (request.method === 'POST') {
+    const text = await request.text();
+    if (text.length > 4e6) return corsError(request, 'Too big.', 413);
+    try {
+      list = JSON.parse(text).streams;
+    } catch {
+      // not JSON: refused below
+    }
+    if (!Array.isArray(list)) return corsError(request, 'Not Torrentio\'s answer.', 400);
+  } else {
+    try {
+      const id = kind === 'series' ? `${imdb}:${season}:${episode}` : imdb;
+      const res = await fetch(`https://torrentio.strem.fun/stream/${kind}/${id}.json`);
+      if (!res.ok) throw new Error(String(res.status));
+      list = (await res.json()).streams || [];
+    } catch (e) {
+      console.log('Torrentio', kind, String(e)); // wrangler tail: its status (429: rate-limited) or the parse error
+      return corsError(request, 'Torrentio unavailable.', 502);
+    }
   }
   const seen = new Set();
   const all = [];
@@ -439,7 +538,7 @@ async function play(request, env, hash) {
   }
 }
 
-// GET /timeline -> {timelines: {hash: {time, duration, percent, updated[, card, season, episode]}}}
+// GET /timeline[?hash=<hash>,…] -> {timelines: {hash: {time, duration, percent, updated[, card, season, episode]}}}
 // POST /timeline {timelines: [{hash, time, duration, percent[, updated, card, season, episode]}]} -> 204
 // Resume points shared by lampa-native and Lampa (the torbox-en plugin pulls them into Lampa's timeline and pushes
 // its own), in D1 (proxy/timeline.sql), keyed by Lampa's hash of the title (+ season and episode); times in
@@ -453,7 +552,11 @@ async function timeline(request, env) {
   if (!(await timelineAllowed(request, env))) return corsError(request, 'Forbidden.', 403);
   const json = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(request) };
   if (request.method === 'GET') {
-    const { results } = await env.DB.prepare('SELECT * FROM timeline').all();
+    const only = new URL(request.url).searchParams.get('hash'); // a series' episodes: lampa-native's marks
+    const { results } = await (only
+      ? env.DB.prepare('SELECT * FROM timeline WHERE hash IN (SELECT value FROM json_each(?))')
+        .bind(JSON.stringify(only.split(',').slice(0, 2000)))
+      : env.DB.prepare('SELECT * FROM timeline')).all();
     const timelines = {};
     for (const { hash, card, season, episode, ...t } of results) {
       timelines[hash] = card ? { ...t, card, ...(season ? { season, episode } : {}) } : t;
@@ -483,7 +586,11 @@ async function timeline(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  scheduled(event, env) {
+    return TITLE_CRONS[event.cron] && env.DB ? refreshTitles(env, TITLE_CRONS[event.cron]) : undefined;
+  },
+
+  async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
@@ -494,10 +601,13 @@ export default {
 
     if (new URL(request.url).pathname === '/grades' && request.method === 'POST') return grades(request, env);
     if (new URL(request.url).pathname === '/home' && request.method === 'GET') return home(request, env);
+    if (new URL(request.url).pathname === '/search' && request.method === 'GET') return search(request, env);
     const film = new URL(request.url).pathname.match(/^\/card\/(movie|tv)\/(\d+)$/);
-    if (film && request.method === 'GET') return filmCard(request, env, film[1], film[2]);
+    if (film && request.method === 'GET') {
+      return edgeCached(request, ctx, () => filmCard(request, env, film[1], film[2]));
+    }
     const src = new URL(request.url).pathname.match(/^\/streams\/(movie|series)\/(tt\d+)(?:\/(\d+)\/(\d+))?$/);
-    if (src && request.method === 'GET' && (src[1] === 'series') === Boolean(src[3])) {
+    if (src && /^(GET|POST)$/.test(request.method) && (src[1] === 'series') === Boolean(src[3])) {
       return sources(request, env, src[1], src[2], src[3], src[4]);
     }
 
