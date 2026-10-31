@@ -118,6 +118,7 @@ test('film page: the cast row (12 with photos) and the other films of its collec
   const film = await (await card('movie/7')).json();
   assert.equal(film.cast.length, 12);
   assert.deepEqual(film.cast.slice(0, 2), [['Actor 0', 'Role 0', '/a0.jpg'], ['Actor 2', 'Role 2', '/a2.jpg']]);
+  assert.equal(film.people, '', 'the photos row names the cast: the text line does not repeat it');
   assert.equal(film.collection, 'Dune Collection');
   // not this film (7): its page doesn't offer itself
   assert.deepEqual(film.parts, [[6, 'movie', 'Dune', '2021', '/1.jpg', 78, '/b1.jpg']]);
