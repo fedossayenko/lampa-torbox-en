@@ -14,6 +14,10 @@ binding = "DB"
 database_name = "lampa-timeline"
 database_id = "f19bd34f-0798-4808-8127-ed4d02eec688"
 
+# lampa-native voice search: speech to text, and a free model when Claude Code on the old MacBook doesn't answer.
+[ai]
+binding = "AI"
+
 # lampa-native search index (titles.sql): English, then Russian (TITLE_CRONS in the worker); hourly: New in 4K at
 # 04 UTC (uhd.sql), For you the other hours (foryou.sql; HOURLY_CRON).
 [triggers]

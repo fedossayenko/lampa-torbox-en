@@ -11,6 +11,7 @@
  *
  * Deploy: npx wrangler deploy (from this directory).
  */
+import VOICE from './voice-prompt.json' with { type: 'json' };
 
 const TORBOX_HOST = 'api.torbox.app';
 
@@ -1179,6 +1180,104 @@ async function mine(request, env) {
 // recommendations and Continue browsing come from it; one already there is moved (its bookmark id, as Lampa sends
 // it). The card as Lampa keeps one (Utils.clearCard's fields, TMDB en-US). scheduled, thrown, viewed: the film's
 // mark (one at a time, as Lampa's), none: no mark; in D1 (CUB's marks need Premium).
+// lampa-native's voice search: the remote's voice button records the request on the stick (16 kHz WAV).
+// POST /voice/hear (the stick's X-Play-Token, the WAV) -> {text}: Deepgram Nova-3 on Workers AI (~0.4 s; English,
+// Russian). The stick then asks Claude Code on the old MacBook what was meant (voice-claude.py, voice-prompt.json's
+// answer) and POSTs /voice/find {text, understood} -> {intent, by, open, results: [Home card + confidence 0-100, -1
+// = found by the filters]}: each guess looked up on TMDB (a year off by more than one halves it), a recommendation's
+// filters searched too (TMDB discover). Without "understood" (the MacBook off, the plan's limit reached) a free
+// Workers AI model reads the text here: titles as well as Claude in the test of 2026-10-31, recommendations worse.
+// open: one title that sure (85+) and 25 ahead of the next opens at once.
+const HEARS = '@cf/deepgram/nova-3';
+const READS = '@cf/meta/llama-4-scout-17b-16e-instruct';
+const VOICE_WAV_MAX = 1e6; // 30 s
+const GENRES = {
+  movie: { action: 28, adventure: 12, animation: 16, comedy: 35, crime: 80, documentary: 99, drama: 18, family: 10751,
+    fantasy: 14, history: 36, horror: 27, music: 10402, mystery: 9648, romance: 10749, 'science fiction': 878,
+    'sci-fi': 878, thriller: 53, war: 10752, western: 37 },
+  tv: { 'action & adventure': 10759, action: 10759, adventure: 10759, animation: 16, comedy: 35, crime: 80,
+    documentary: 99, drama: 18, family: 10751, kids: 10762, mystery: 9648, 'sci-fi & fantasy': 10765,
+    'science fiction': 10765, 'sci-fi': 10765, fantasy: 10765, 'war & politics': 10768, war: 10768, western: 37 },
+};
+
+const voicePrompt = () => VOICE.system.join('\n').replace('{today}', new Date().toISOString().slice(0, 10));
+const jsonIn = (s) => { try { return JSON.parse(s.slice(s.indexOf('{'), s.lastIndexOf('}') + 1)); } catch { return null; } };
+const voiceAnswer = (request, o) => new Response(JSON.stringify(o), {
+  headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(request) },
+});
+
+async function voiceHear(request, env) {
+  if (!sameSecret(request.headers.get('X-Play-Token'), env.PLAY_TOKEN)) return corsError(request, 'Forbidden.', 403);
+  const wav = await request.arrayBuffer();
+  if (wav.byteLength <= 44 || wav.byteLength > VOICE_WAV_MAX) return corsError(request, 'A WAV of 30 s at most.', 413);
+  try {
+    const o = await env.AI.run(HEARS, { audio: { body: new Blob([wav]).stream(), contentType: 'audio/wav' },
+      detect_language: true, smart_format: true });
+    return voiceAnswer(request, { text: (o?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '').trim() });
+  } catch {
+    return corsError(request, 'Speech to text failed.', 502);
+  }
+}
+
+// A guess on TMDB: its year first, any year when that finds nothing.
+async function voiceLookUp(env, guess) {
+  const type = guess.type === 'tv' ? 'tv' : 'movie';
+  const year = Math.trunc(Number(guess.year)) || 0;
+  const look = (extra) => tmdb(env, `search/${type}`,
+    `&include_adult=false&query=${encodeURIComponent(guess.title.slice(0, 100))}${extra}`)
+    .then((res) => (res.ok ? res.json() : {})).then((o) => (o.results || []).filter((m) => m.poster_path))
+    .catch(() => []);
+  const m = (year && (await look(`&${type === 'tv' ? 'first_air_date_year' : 'year'}=${year}`))[0]) || (await look(''))[0];
+  if (!m) return null;
+  const off = year && Math.abs(Number((m.release_date || m.first_air_date || '').slice(0, 4)) - year) > 1;
+  return [...cardOf(m, type), Math.round(Math.min(1, Math.max(0, Number(guess.confidence) || 0)) * (off ? 50 : 100))];
+}
+
+// A recommendation's filters: keywords (any of 3), genres (any), years (up to today), family = rated PG at most.
+async function voiceDiscover(env, d) {
+  const type = d.type === 'tv' ? 'tv' : 'movie';
+  const date = type === 'tv' ? 'first_air_date' : 'primary_release_date';
+  const keywords = (await Promise.all((Array.isArray(d.keywords) ? d.keywords : []).slice(0, 3)
+    .map((k) => tmdb(env, 'search/keyword', `&query=${encodeURIComponent(String(k).slice(0, 50))}`)
+      .then((res) => (res.ok ? res.json() : {})).then((o) => o.results?.[0]?.id).catch(() => null)))).filter(Boolean);
+  const genres = new Set((Array.isArray(d.genres) ? d.genres : []).map((g) => GENRES[type][String(g).toLowerCase()]));
+  if (d.family && type === 'tv') genres.add(10751).add(10762);
+  genres.delete(undefined);
+  const today = new Date().toISOString().slice(0, 10);
+  const from = Math.trunc(Number(d.from)) || 0, to = Math.trunc(Number(d.to)) || 0;
+  const query = `&include_adult=false&sort_by=popularity.desc&vote_count.gte=${from >= Number(today.slice(0, 4)) - 2 ? 20 : 100}`
+    + (from ? `&${date}.gte=${from}-01-01` : '') + `&${date}.lte=${to && `${to}-12-31` < today ? `${to}-12-31` : today}`
+    + (keywords.length ? `&with_keywords=${keywords.join('|')}` : '') + (genres.size ? `&with_genres=${[...genres].join('|')}` : '')
+    + (d.family && type === 'movie' ? '&certification_country=US&certification.lte=PG' : '');
+  const o = await tmdb(env, `discover/${type}`, query).then((res) => (res.ok ? res.json() : {})).catch(() => ({}));
+  return (o.results || []).filter((m) => m.poster_path).map((m) => [...cardOf(m, type), -1]);
+}
+
+async function voiceFind(request, env) {
+  if (!sameSecret(request.headers.get('X-Play-Token'), env.PLAY_TOKEN)) return corsError(request, 'Forbidden.', 403);
+  const ask = await request.json().catch(() => null);
+  const text = String(ask?.text || '').trim().slice(0, 300);
+  let understood = ask?.understood && typeof ask.understood === 'object' ? ask.understood : null;
+  const by = understood ? 'claude' : 'workers-ai';
+  if (!understood && text && env.AI) {
+    const o = await env.AI.run(READS, { messages: [{ role: 'system', content: voicePrompt() }, { role: 'user', content: text }],
+      max_tokens: 1500 }).catch(() => null);
+    understood = typeof o?.response === 'object' ? o.response : jsonIn(String(o?.response || ''));
+  }
+  if (!understood) return corsError(request, 'Not understood.', 502);
+  const intent = ['title', 'describe', 'recommend'].includes(understood.intent) ? understood.intent : 'title';
+  const guesses = (Array.isArray(understood.candidates) ? understood.candidates : [])
+    .filter((c) => c && typeof c.title === 'string' && c.title.trim()).slice(0, 8);
+  const [found, more] = await Promise.all([Promise.all(guesses.map((g) => voiceLookUp(env, g))),
+    intent === 'recommend' && understood.discover ? voiceDiscover(env, understood.discover) : []]);
+  const seen = new Set();
+  const results = [...found.filter(Boolean), ...more]
+    .filter((c) => !seen.has(`${c[1]}:${c[0]}`) && seen.add(`${c[1]}:${c[0]}`)).slice(0, 20);
+  const [a, b] = results;
+  const open = intent !== 'recommend' && Boolean(a) && a[7] >= 85 && (!b || b[7] <= a[7] - 25);
+  return voiceAnswer(request, { intent, by, open, results });
+}
+
 const LAMPA_FIELDS = ['poster_path', 'overview', 'release_date', 'id', 'original_title', 'original_language', 'title',
   'backdrop_path', 'popularity', 'vote_count', 'vote_average', 'imdb_id', 'original_name', 'name', 'first_air_date',
   'origin_country', 'status', 'number_of_seasons', 'number_of_episodes'];
@@ -1260,6 +1359,8 @@ export default {
     const listed = new URL(request.url).pathname
       .match(/^\/mine\/(history|book|unbook|viewed|scheduled|thrown|none)\/(movie|tv)\/(\d+)$/);
     if (listed && request.method === 'POST') return bookmark(request, env, listed[1], listed[2], listed[3]);
+    if (new URL(request.url).pathname === '/voice/hear' && request.method === 'POST') return voiceHear(request, env);
+    if (new URL(request.url).pathname === '/voice/find' && request.method === 'POST') return voiceFind(request, env);
 
     const scores = new URL(request.url).pathname.match(/^\/mdblist\/(movie|show)(?:\/(\d+))?$/);
     if (scores && (scores[2] || request.method === 'POST')) return mdblist(request, env, scores[1], scores[2]);
