@@ -33,6 +33,13 @@ test('sends only what a card draws: [id, type, name, year, poster, score]', asyn
   ]);
 });
 
+// The stick's org.json (Android's) turns JSON null into the text "null", the tests' one throws: never send null.
+test('always sends strings, even when TMDB leaves out the name or the date', async () => {
+  tmdbAnswers({ 'movie/popular': { results: [{ id: 5, poster_path: '/p.jpg' }] } });
+  const { rows } = await (await worker.fetch(new Request('https://w/home'), env)).json();
+  assert.deepEqual(rows, [['Popular films', [[5, 'movie', '', '', '/p.jpg', 0]]]]);
+});
+
 test('answers 502 when every row fails', async () => {
   tmdbAnswers({});
   assert.equal((await worker.fetch(new Request('https://w/home'), env)).status, 502);

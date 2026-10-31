@@ -171,7 +171,8 @@ async function home(request, env) {
       for (const m of JSON.parse(text).results || []) {
         const type = m.media_type || path.split('/')[0]; // trending mixes in people: skipped below
         if ((type !== 'movie' && type !== 'tv') || !m.poster_path) continue;
-        items.push([m.id, type, m.title || m.name, (m.release_date || m.first_air_date || '').slice(0, 4),
+        // never null: the stick's org.json turns it into the text "null"
+        items.push([m.id, type, m.title || m.name || '', (m.release_date || m.first_air_date || '').slice(0, 4),
           m.poster_path, Math.round((m.vote_average || 0) * 10)]);
       }
       return [title, items];
