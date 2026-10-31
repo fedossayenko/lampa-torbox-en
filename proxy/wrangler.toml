@@ -14,6 +14,7 @@ binding = "DB"
 database_name = "lampa-timeline"
 database_id = "f19bd34f-0798-4808-8127-ed4d02eec688"
 
-# lampa-native search index (titles.sql): English, then Russian (TITLE_CRONS in the worker).
+# lampa-native search index (titles.sql): English, then Russian (TITLE_CRONS in the worker); hourly: New in 4K at
+# 04 UTC (uhd.sql), For you the other hours (foryou.sql; HOURLY_CRON).
 [triggers]
-crons = ["7 3 * * *", "37 3 * * *"]
+crons = ["7 3 * * *", "37 3 * * *", "23 * * * *"]

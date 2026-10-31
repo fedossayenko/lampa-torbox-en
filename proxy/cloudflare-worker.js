@@ -871,20 +871,27 @@ async function englishCards(env, wanted, fallback, fetchMax = 20) {
   return wanted.map(([type, id], i) => known.get(`${type}:${id}`) || fallback[i]);
 }
 
-// Series' last aired episode ("season:episode"), original name (Lampa's keys) and English card, from TMDB, kept a
-// day in D1 (shows.sql): a series leaves Continue browsing once that episode is watched (Carrie, user 2026-10-31)
+// Series' last aired episode ("season:episode"), original name (Lampa's keys) and English card, from TMDB, kept in
+// D1 (shows.sql; showStale): a series leaves Continue browsing once that episode is watched (Carrie, user 2026-10-31)
 // and comes back when a new one airs; also its IMDb id, seasons and air dates, for new episodes. At most SHOW_FETCH
 // asked of TMDB a request (the free plan's 50 subrequests); the others on the next asks. ids in, id → {original,
 // last, card, imdb, seasons, aired} out (shows.sql).
-const SHOW_TTL = 86400e3;
-const SHOW_FETCH = 15;
+const SHOW_FETCH = 12;
+// Asked of TMDB again on the next episode's air date (hourly that day; a week at most), a month after it ended or
+// was canceled, every 3 days while it waits for a date: a new season may come years later (user 2026-10-31).
+function showStale(r, now) {
+  if (!r || r.seasons == null || r.status == null) return true; // or kept before these were
+  const age = now - r.t;
+  if (r.status === 'Ended' || r.status === 'Canceled') return age > 30 * 86400e3;
+  if (r.next_air) return (now >= Date.parse(r.next_air) && age > 3600e3) || age > 7 * 86400e3;
+  return age > 3 * 86400e3;
+}
 async function shows(env, ids) {
   const now = Date.now();
   const have = new Map(env.DB && ids.length ? (await env.DB.prepare(
-    'SELECT id, original, last, card, t, imdb, seasons, aired FROM shows WHERE id IN (SELECT value FROM json_each(?))')
+    'SELECT * FROM shows WHERE id IN (SELECT value FROM json_each(?))')
     .bind(JSON.stringify(ids)).all().then((r) => r.results).catch(() => [])).map((r) => [r.id, r]) : []);
-  const stale = ids.filter((id) => !have.has(id) || now - have.get(id).t > SHOW_TTL || have.get(id).seasons == null)
-    .slice(0, SHOW_FETCH);
+  const stale = ids.filter((id) => showStale(have.get(id), now)).slice(0, SHOW_FETCH);
   const got = (await Promise.all(stale.map((id) => tmdb(env, `tv/${id}`, '&append_to_response=external_ids')
     .then((res) => (res.ok ? res.json() : null))
     .catch(() => null)))).filter((m) => m && m.id && m.poster_path);
@@ -892,16 +899,18 @@ async function shows(env, ids) {
     const l = m.last_episode_to_air;
     return { id: m.id, original: m.original_name || m.name || '', last: l ? `${l.season_number}:${l.episode_number}` : '',
       card: JSON.stringify(cardOf(m, 'tv')), t: now, imdb: m.external_ids?.imdb_id || null, aired: l?.air_date || null,
+      status: m.status || null, next_air: m.next_episode_to_air?.air_date || null,
       seasons: JSON.stringify((m.seasons || []).filter((x) => x.season_number > 0)
         .map((x) => [x.season_number, x.episode_count || 0, x.air_date || null])) };
   });
   for (const r of rows) have.set(r.id, r);
   if (rows.length && env.DB) {
-    await env.DB.prepare(`INSERT INTO shows (id, original, last, card, t, imdb, seasons, aired)
+    await env.DB.prepare(`INSERT INTO shows (id, original, last, card, t, imdb, seasons, aired, status, next_air)
         SELECT value->>'id', value->>'original', value->>'last', value->>'card', value->>'t', value->>'imdb',
-          value->>'seasons', value->>'aired' FROM json_each(?) WHERE true
+          value->>'seasons', value->>'aired', value->>'status', value->>'next_air' FROM json_each(?) WHERE true
         ON CONFLICT (id) DO UPDATE SET original = excluded.original, last = excluded.last, card = excluded.card,
-          t = excluded.t, imdb = excluded.imdb, seasons = excluded.seasons, aired = excluded.aired`)
+          t = excluded.t, imdb = excluded.imdb, seasons = excluded.seasons, aired = excluded.aired,
+          status = excluded.status, next_air = excluded.next_air`)
       .bind(JSON.stringify(rows)).run().catch(() => {}); // asked again next time
   }
   return have;
@@ -956,6 +965,88 @@ async function freshOut(env, list) {
   return new Set(list.filter((x) => rows.get(x.key)?.out).map((x) => x.key));
 }
 
+// New in 4K (user 2026-10-31): CUB's own list of the latest 4K releases (Lampa's "In high quality" row). Its 4K
+// means a 4K release with Russian audio: 13 of its newest 15 films had one on Torrentio, none of its WEB-DL ones
+// (Fall 2: 14 English 4K releases). Read once a day; each title's first day in it is kept (uhd.sql), so the row is
+// what turned 4K lately. Well-known ones only (100+ votes or IMDb 7+); English cards from the search index or TMDB.
+const UHD_LISTS = [['movie', 3], ['tv', 2]]; // [CUB's category, pages of 20]
+async function refreshUhd(env, now) {
+  const got = [];
+  for (const [cat, pages] of UHD_LISTS) {
+    for (let p = 1; p <= pages; p++) {
+      const json = await fetch(`https://tmdb.cub.best/?cat=${cat}&sort=latest&uhd=true&page=${p}`)
+        .then((res) => (res.ok ? res.json() : null)).catch(() => null);
+      (json?.results || []).forEach((c, i) => {
+        if (c?.id && (Number(c.vote_count) >= 100 || Number(c.imdb_rating) >= 7)) got.push({ type: cat, id: Number(c.id), pos: (p - 1) * 20 + i });
+      });
+    }
+  }
+  const rows = (await env.DB.prepare('SELECT type, id, card IS NULL AS bare FROM uhd').all()).results;
+  const have = new Set(rows.map((r) => `${r.type}:${r.id}`));
+  const want = [...got.filter((x) => !have.has(`${x.type}:${x.id}`)), ...rows.filter((r) => r.bare)]; // no English card yet
+  if (!want.length) return;
+  const cards = await englishCards(env, want.map((x) => [x.type, Number(x.id)]), want.map(() => null), 30);
+  await env.DB.prepare(`INSERT INTO uhd (type, id, t, pos, card) SELECT value->>'type', value->>'id', ?, value->>'pos',
+      value->>'card' FROM json_each(?) WHERE true ON CONFLICT (type, id) DO UPDATE SET card = COALESCE(uhd.card, excluded.card)`)
+    .bind(now, JSON.stringify(want.map((x, i) => ({ type: x.type, id: Number(x.id), pos: x.pos ?? 0,
+      card: cards[i] ? JSON.stringify(cards[i]) : null })))).run();
+}
+
+// For you (grades-patch.js's, made here: TMDB's recommendations of 240+ graded films are more than the 50
+// subrequests a request allows): TMDB recommendations of each Loved (×2), Good (×1) and Bad (×-1) film, kept a week
+// (foryou.sql: recs), RECS_FETCH an hour; ranked per account into its top 60 cards (foryou), what /mine shows minus
+// what was played since. Higher in a list counts more; 200+ votes and TMDB 6.5+ only; animation only from animated
+// films (TMDB adds cartoon spin-offs). Lampa's "We recommend to see" (from the history) is left out: the cron can't
+// read CUB.
+const RECS_KEEP = 7 * 86400e3;
+const RECS_FETCH = 25;
+const WEIGHT = { 2: 2, 1: 1, '-1': -1 };
+async function refreshForYou(env) {
+  const now = Date.now();
+  const whos = (await env.GRADES.list()).keys.map((k) => k.name);
+  const graded = await Promise.all(whos.map((w) => env.GRADES.get(w, 'json')));
+  const seedsOf = (g) => Object.keys(g || {}).filter((k) => /^(movie|tv)_\d+$/.test(k) && WEIGHT[g[k]?.g]);
+  const seeds = [...new Set(graded.flatMap(seedsOf))];
+  const have = new Map((await env.DB.prepare('SELECT key, list, t FROM recs WHERE key IN (SELECT value FROM json_each(?))')
+    .bind(JSON.stringify(seeds)).all()).results.map((r) => [r.key, r]));
+  const due = seeds.filter((k) => !have.has(k) || now - have.get(k).t > RECS_KEEP).slice(0, RECS_FETCH);
+  const got = (await Promise.all(due.map((k) => {
+    const [type, id] = k.split('_');
+    return tmdb(env, `${type}/${id}/recommendations`).then((res) => (res.ok ? res.json() : null)).then((j) => j && {
+      key: k, t: now, list: JSON.stringify((j.results || []).filter((m) => m.id).map((m) => [type, m.id, m.vote_count || 0,
+        Math.round((m.vote_average || 0) * 10), (m.genre_ids || []).includes(16) ? 1 : 0])),
+    }).catch(() => null);
+  }))).filter(Boolean);
+  if (got.length) {
+    await env.DB.prepare(`INSERT INTO recs (key, list, t) SELECT value->>'key', value->>'list', value->>'t' FROM json_each(?)
+      WHERE true ON CONFLICT (key) DO UPDATE SET list = excluded.list, t = excluded.t`).bind(JSON.stringify(got)).run();
+  }
+  for (const r of got) have.set(r.key, r);
+  for (const [i, who] of whos.entries()) {
+    const g = graded[i] || {};
+    const score = new Map();
+    const tie = new Map();
+    for (const k of seedsOf(g)) {
+      if (!have.has(k)) continue;
+      const animated = (g[k].card?.genre_ids || []).includes(16);
+      JSON.parse(have.get(k).list).forEach(([type, id, votes, rating, cartoon], at) => {
+        const key = `${type}_${id}`;
+        if ((cartoon && !animated) || g[key]?.g != null || votes < 200 || rating < 65) return;
+        score.set(key, (score.get(key) || 0) + WEIGHT[g[k].g] * (1 - at / 40));
+        tie.set(key, rating);
+      });
+    }
+    const top = [...score].filter(([, x]) => x > 0).sort((a, b) => b[1] - a[1] || tie.get(b[0]) - tie.get(a[0]))
+      .slice(0, 60).map(([k]) => k.split('_'));
+    const cards = (await englishCards(env, top.map(([type, id]) => [type, Number(id)]), top.map(() => null), 15)).filter(Boolean);
+    await env.DB.prepare(`INSERT INTO foryou (who, cards, t) VALUES (?, ?, ?)
+      ON CONFLICT (who) DO UPDATE SET cards = excluded.cards, t = excluded.t`).bind(who, JSON.stringify(cards), now).run();
+  }
+}
+// The hourly cron: New in 4K at 04 UTC (and while it has nothing), For you the other hours (each its own 50
+// subrequests).
+const HOURLY_CRON = '23 * * * *';
+
 // Lampa's marks (favorite.js; one at a time): Looking, Viewed, Scheduled, To be continued, Thrown. The app's Finish
 // later is Scheduled, Not interested is Thrown, Watched it is Viewed: all three leave Continue browsing. CUB keeps
 // marks for Premium accounts only (error 555 "Нет премиум доступа"), so the app's go to D1 (marks.sql), per account
@@ -968,7 +1059,9 @@ const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 // {"rows": [...] as /home, "marks": {"tv_93740": "scheduled", ...}, "grades": {"movie_603": 2, ...}, "new":
 // {"tv_93740": "S3 E5", ...}}: the rows of Lampa's CUB home that are yours, for the top of lampa-native's Home,
 // every film's mark and grade (the film page's ⋯ and ★ show them; grades: KV GRADES as /grades, "skip" = Didn't
-// watch / not mine), and the series with a new episode out (nextNew, freshOut): first in Continue browsing.
+// watch / not mine), the series with a new episode out (nextNew, freshOut): first in Continue browsing, and "mylist":
+// ["movie_603", ...], what My list holds (the film page's ⋯ adds or removes).
+// Rows: Continue browsing, For you, New in 4K (both made by the hourly cron), My list, Finish later, Rate what you watched.
 // Continue browsing: Lampa's (favorite.js continues): the series in the history, newest first, 19 at most; here
 // also the films being watched (5 min in, under 90 %: the timeline; shorter is a try of a release, its sound or a
 // test: user 2026-10-31; their film page still resumes from 10 s), which Lampa's main screen leaves out. Out of it:
@@ -981,9 +1074,10 @@ const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 async function mine(request, env) {
   const who = await cubUser(request, env);
   if (!who) return corsError(request, 'CUB sign-in required.', 401);
-  const [dump, ours, graded] = await Promise.all([cubApi(request, 'bookmarks/dump'), env.DB
-    ? env.DB.prepare('SELECT card, mark FROM marks WHERE who = ?').bind(who).all().then((r) => r.results).catch(() => [])
-    : [], env.GRADES ? env.GRADES.get(who, 'json').catch(() => null) : null]);
+  const db = (sql, ...args) => (env.DB ? env.DB.prepare(sql).bind(...args).all().then((r) => r.results).catch(() => []) : []);
+  const [dump, ours, graded, picks, uhd] = await Promise.all([cubApi(request, 'bookmarks/dump'),
+    db('SELECT card, mark FROM marks WHERE who = ?', who), env.GRADES ? env.GRADES.get(who, 'json').catch(() => null) : null,
+    db('SELECT cards FROM foryou WHERE who = ?', who), db('SELECT type, id, card FROM uhd WHERE card IS NOT NULL ORDER BY t DESC, pos LIMIT 100')]);
   if (!dump || !Array.isArray(dump.bookmarks)) return corsError(request, 'CUB unavailable.', 502);
   const marks = {};
   for (const b of dump.bookmarks) if (MARKS.includes(b.type) && /^(movie|tv)$/.test(b.card_type)) marks[`${b.card_type}_${b.card_id}`] = b.type;
@@ -998,19 +1092,26 @@ async function mine(request, env) {
       return null;
     }
   };
-  const newest = (type) => dump.bookmarks.filter((b) => b.type === type && /^(movie|tv)$/.test(b.card_type))
-    .sort((a, b) => (Number(b.time) || 0) - (Number(a.time) || 0));
-  const markOf = (b) => marks[`${b.card_type}_${b.card_id}`];
+  const byTime = (a, b) => (Number(b.time) || 0) - (Number(a.time) || 0);
+  const newest = (...types) => dump.bookmarks.filter((b) => types.includes(b.type) && /^(movie|tv)$/.test(b.card_type)).sort(byTime);
+  const keyOf = (b) => `${b.card_type}_${b.card_id}`;
+  const once = (list) => [...new Map(list.map((b) => [keyOf(b), b]).reverse()).values()].reverse(); // the newest of each
+  const markOf = (b) => marks[keyOf(b)];
   const all = newest('history');
   const recent = all.slice(0, 100).map((b) => (AWAY.has(markOf(b)) ? { ...parsed(b), away: true } : parsed(b)))
     .filter((h) => h?.card);
   const history = recent.filter((h) => !h.away);
-  const laterIds = new Set();
-  const later = [...all.filter((b) => markOf(b) === 'scheduled'), ...newest('scheduled')]
-    .filter((b) => !laterIds.has(`${b.card_type}_${b.card_id}`) && laterIds.add(`${b.card_type}_${b.card_id}`))
-    .slice(0, 40).map(parsed).filter(Boolean);
+  const later = once([...all.filter((b) => markOf(b) === 'scheduled'), ...newest('scheduled')]).slice(0, 40).map(parsed)
+    .filter(Boolean);
+  // My list (user 2026-10-31: one list, not three): Lampa's Bookmarks and Later together, newest first
+  const listed = once(newest('book', 'wath'));
+  const mylist = listed.slice(0, 40).map(parsed).filter(Boolean);
   const series = history.filter((h) => h.type === 'tv').slice(0, 30);
-  const info = await shows(env, [...new Set([...series, ...later.filter((h) => h.type === 'tv')].map((h) => Number(h.card.id)))]);
+  // every series in the history but Not interested and Finish later ones: a new season may come years later
+  const followed = once(all.filter((b) => b.card_type === 'tv' && !['thrown', 'scheduled'].includes(markOf(b))))
+    .map(parsed).filter(Boolean);
+  const info = await shows(env, [...new Set([...series, ...later.filter((h) => h.type === 'tv'), ...followed]
+    .map((h) => Number(h.card.id)))]);
   const hash = (c) => lampaHash(c.original_title || c.title || '');
   const lastKey = (h) => {
     const s = info.get(Number(h.card.id));
@@ -1027,8 +1128,7 @@ async function mine(request, env) {
   };
   // ponytail: every point past 70 % read (~300 in 2026-10, one small query); a series' episodes hashed up to its
   // seasons (30 when CUB's card doesn't say) × 30 episodes, as grades-patch.js scans them
-  const done = new Map(env.DB ? (await env.DB.prepare('SELECT hash, percent, updated FROM timeline WHERE percent >= 70')
-    .all().then((r) => r.results).catch(() => [])).map((p) => [p.hash, p]) : []);
+  const done = new Map((await db('SELECT hash, percent, updated FROM timeline WHERE percent >= 70')).map((p) => [p.hash, p]));
   const watched = (h) => {
     if (h.type === 'movie') return done.has(hash(h.card));
     const original = h.card.original_name || h.card.name || '';
@@ -1038,27 +1138,35 @@ async function mine(request, env) {
     return false;
   };
   const rate = recent.filter((h) => !(`${h.type}_${h.card.id}` in grades) && watched(h)).slice(0, 20);
-  const continuing = history.filter(going).slice(0, 19);
-  const newOnes = continuing.map((h) => {
-    const s = h.type === 'tv' && info.get(Number(h.card.id));
+  const newOnes = followed.map((h) => {
+    const s = info.get(Number(h.card.id));
     const next = s && s.imdb && s.last ? nextNew(s, done, Date.now()) : null;
     return next && { h, next, imdb: s.imdb, key: `${h.card.id}/${next[0]}/${next[1]}` };
   }).filter(Boolean);
   const out = await freshOut(env, newOnes);
   const fresh = {};
   for (const x of newOnes) if (out.has(x.key)) fresh[`tv_${x.h.card.id}`] = `S${x.next[0]} E${x.next[1]}`;
-  const first = (h) => (h.type === 'tv' && `tv_${h.card.id}` in fresh ? 0 : 1);
+  const isNew = (h) => h.type === 'tv' && `tv_${h.card.id}` in fresh;
+  const continuing = [...followed.filter(isNew), ...history.filter((h) => going(h) && !isNew(h))].slice(0, 19);
+  // English cards: a series' from shows, the others from the search index or TMDB (15 a request at most)
+  const lists = [['Continue browsing', continuing], ['My list', mylist], ['Finish later', later], ['Rate what you watched', rate]];
+  const rest = [...new Map(lists.flatMap(([, l]) => l).filter((h) => !(h.type === 'tv' && info.has(Number(h.card.id))))
+    .map((h) => [`${h.type}:${h.card.id}`, h])).values()];
+  const english = await englishCards(env, rest.map((h) => [h.type, Number(h.card.id)]), rest.map((h) => cardOf(h.card, h.type)), 15);
+  const cardsOf = new Map(rest.map((h, i) => [`${h.type}:${h.card.id}`, english[i]]));
+  const cardFor = (h) => (h.type === 'tv' && info.has(Number(h.card.id)) ? JSON.parse(info.get(Number(h.card.id)).card)
+    : cardsOf.get(`${h.type}:${h.card.id}`));
+  // For you and New in 4K (the hourly cron's): without what you played, graded or marked
+  const played = new Set(all.map(keyOf));
+  const unseen = (type, id) => !played.has(`${type}_${id}`) && !(`${type}_${id}` in grades) && !marks[`${type}_${id}`];
+  const forYou = JSON.parse(picks[0]?.cards || '[]').filter((c) => unseen(c[1], c[0])).slice(0, 20);
+  const in4k = uhd.filter((r) => unseen(r.type, r.id)).slice(0, 20).map((r) => JSON.parse(r.card));
   const rows = [];
-  for (const [title, list] of [['Continue browsing', continuing.sort((a, b) => first(a) - first(b))], ['Finish later', later],
-    ['Rate what you watched', rate]]) {
-    // English: a series' from shows, the others from the search index or TMDB
-    const rest = list.filter((h) => !(h.type === 'tv' && info.has(Number(h.card.id))));
-    const english = await englishCards(env, rest.map((h) => [h.type, Number(h.card.id)]), rest.map((h) => cardOf(h.card, h.type)), 10);
-    const cards = list.map((h) => (h.type === 'tv' && info.has(Number(h.card.id))
-      ? JSON.parse(info.get(Number(h.card.id)).card) : english[rest.indexOf(h)]));
+  for (const [title, cards] of [['Continue browsing', continuing.map(cardFor)], ['For you', forYou], ['New in 4K', in4k],
+    ...lists.slice(1).map(([title, l]) => [title, l.map(cardFor)])]) {
     if (cards.length) rows.push([title, cards]);
   }
-  return new Response(JSON.stringify({ rows, marks, grades, new: fresh }), {
+  return new Response(JSON.stringify({ rows, marks, grades, new: fresh, mylist: listed.map(keyOf) }), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(request) },
   });
 }
@@ -1074,7 +1182,7 @@ const LAMPA_FIELDS = ['poster_path', 'overview', 'release_date', 'id', 'original
 async function bookmark(request, env, list, type, id) {
   const who = await cubUser(request, env);
   if (!who) return corsError(request, 'CUB sign-in required.', 401);
-  if (list !== 'history') {
+  if (!['history', 'book', 'unbook'].includes(list)) {
     if (!env.DB) return corsError(request, 'No database.', 502);
     await (list === 'none'
       ? env.DB.prepare('DELETE FROM marks WHERE who = ? AND card = ?').bind(who, `${type}_${id}`)
@@ -1096,7 +1204,9 @@ async function bookmark(request, env, list, type, id) {
     if (!json || json.error) throw new Error(`CUB refused ${method} ${kind}${json ? ` (${json.code})` : ''}`);
   };
   try {
-    await send('add', 'history', mine.find((b) => b.type === 'history')?.id ?? 0);
+    if (list === 'unbook') {
+      for (const b of mine.filter((x) => x.type === 'book' || x.type === 'wath')) await send('remove', b.type, b.id);
+    } else await send('add', list, mine.find((b) => b.type === list)?.id ?? 0);
   } catch (e) {
     return corsError(request, `${e.message}.`, 502);
   }
@@ -1104,8 +1214,14 @@ async function bookmark(request, env, list, type, id) {
 }
 
 export default {
-  scheduled(event, env) {
-    return TITLE_CRONS[event.cron] && env.DB ? refreshTitles(env, TITLE_CRONS[event.cron]) : undefined;
+  async scheduled(event, env) {
+    if (!env.DB) return undefined;
+    if (event.cron === HOURLY_CRON) {
+      const empty = !(await env.DB.prepare('SELECT 1 FROM uhd LIMIT 1').first()); // the first run fills it at once
+      return new Date(event.scheduledTime).getUTCHours() === 4 || empty ? refreshUhd(env, event.scheduledTime)
+        : env.GRADES && refreshForYou(env);
+    }
+    return TITLE_CRONS[event.cron] ? refreshTitles(env, TITLE_CRONS[event.cron]) : undefined;
   },
 
   async fetch(request, env, ctx) {
@@ -1139,7 +1255,7 @@ export default {
     if (new URL(request.url).pathname === '/timeline') return timeline(request, env);
     if (new URL(request.url).pathname === '/mine' && request.method === 'GET') return mine(request, env);
     const listed = new URL(request.url).pathname
-      .match(/^\/mine\/(history|viewed|scheduled|thrown|none)\/(movie|tv)\/(\d+)$/);
+      .match(/^\/mine\/(history|book|unbook|viewed|scheduled|thrown|none)\/(movie|tv)\/(\d+)$/);
     if (listed && request.method === 'POST') return bookmark(request, env, listed[1], listed[2], listed[3]);
 
     const scores = new URL(request.url).pathname.match(/^\/mdblist\/(movie|show)(?:\/(\d+))?$/);

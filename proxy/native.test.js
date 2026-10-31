@@ -382,6 +382,8 @@ function d1() {
   db.exec(readFileSync(new URL('./titles.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./shows.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./fresh.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('./uhd.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('./foryou.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./marks.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./segments.sql', import.meta.url), 'utf8'));
   const stmt = (sql, args = []) => ({
@@ -604,9 +606,10 @@ test('mine: Continue browsing = the history\'s series, newest first, minus Viewe
       bm(6, 'history', 'tv', 500, { id: 77, name: 'KP only', source: 'kp' }),
       bm(7, 'book', 'tv', 600, { id: 66, name: 'A bookmark' }),
     ]),
-    'tv/83867': { id: 83867, name: 'Andor', first_air_date: '2022-09-21', poster_path: '/andor-en.jpg', vote_average: 8.4 },
+    'tv/83867': { id: 83867, name: 'Andor', first_air_date: '2022-09-21', poster_path: '/andor-en.jpg', vote_average: 8.4,
+      status: 'Ended' },
     'tv/1399': { id: 1399, name: 'Game of Thrones', first_air_date: '2011-04-17', poster_path: '/got-en.jpg', vote_average: 8.5,
-      backdrop_path: '/b.jpg' },
+      backdrop_path: '/b.jpg', status: 'Ended' },
     'tv/5': { id: 5, name: 'Thrown away', poster_path: '/t.jpg' },
   };
   cub(got);
@@ -614,15 +617,17 @@ test('mine: Continue browsing = the history\'s series, newest first, minus Viewe
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('Cache-Control'), 'no-store');
   const body = await res.json();
-  assert.deepEqual(body.rows, [['Continue browsing', [
+  assert.deepEqual(body.rows[0], ['Continue browsing', [
     [83867, 'tv', 'Andor', '2022', '/andor-en.jpg', 84, ''],
     [1399, 'tv', 'Game of Thrones', '2011', '/got-en.jpg', 85, '/b.jpg'],
-  ]]]);
+  ]]);
+  assert.deepEqual(body.rows.map(([t, cards]) => [t, cards.map((c) => c[0])]).slice(1), [['My list', [66]]]);
+  assert.deepEqual(body.mylist, ['tv_66']);
   assert.deepEqual(body.marks, { tv_5: 'thrown' });
   assert.ok(!asked.some((u) => u.includes('tv/5')), 'a thrown series isn\'t asked about');
   cub(got);
   await getMine(e);
-  assert.ok(!asked.some((u) => u.includes('themoviedb')), 'the series kept a day: TMDB not asked again');
+  assert.ok(!asked.some((u) => /tv\/(1399|83867)/.test(u)), 'the series kept: TMDB not asked again');
 });
 
 test('mine: a series whose last aired episode is watched leaves; Finish later = Scheduled, out of Continue', async () => {
@@ -751,6 +756,134 @@ test('mine: a new episode out with RU/UA audio goes first in Continue browsing, 
   assert.deepEqual((await (await getMine(e)).json()).new, {}, 'Torrentio down: no label');
 });
 
+test('mine: a new season years later: any series in the history, past its newest 100; not a Not interested one', async () => {
+  const e = mineEnv();
+  const ago = (days) => Date.now() - days * 86400e3;
+  const day = (days) => new Date(ago(days)).toISOString().slice(0, 10);
+  e.DB.raw.prepare('INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, 1, 2, 100, 0)').run(lampaHashOf('18Severance'));
+  e.DB.raw.prepare('INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, 1, 2, 100, 0)').run(lampaHashOf('16Gone'));
+  const films = Array.from({ length: 120 }, (_, i) => bm(1000 + i, 'history', 'movie', 1000 + i, { id: 5000 + i, title: `F${i}` }));
+  const show = (id, name, imdb) => ({ id, name, original_name: name, poster_path: `/${id}.jpg`, status: 'Returning Series',
+    external_ids: { imdb_id: imdb }, seasons: [{ season_number: 1, episode_count: 8, air_date: '2022-02-18' },
+      { season_number: 2, episode_count: 10, air_date: day(3) }],
+    last_episode_to_air: { season_number: 2, episode_number: 1, air_date: day(3) } });
+  cub({
+    'users/get': { user: { id: 42 } },
+    'bookmarks/dump': cubDump([...films, bm(1, 'history', 'tv', 1, { id: 95396, name: 'Разделение' }),
+      bm(2, 'history', 'tv', 2, { id: 7, name: 'Ушедший' }), bm(3, 'thrown', 'tv', 3, { id: 7, name: 'Ушедший' })]),
+    'tv/95396': show(95396, 'Severance', 'tt11280740'),
+    'tv/7': show(7, 'Gone', 'tt7'),
+    '/stream/series/tt11280740:2:1.json': { streams: [{ infoHash: 'c'.repeat(40), title: 'Severance.S02E01\n👤 9 💾 3 GB ⚙️ x\n🇷🇺' }] },
+  });
+  const { rows, new: fresh } = await (await getMine(e)).json();
+  assert.deepEqual(fresh, { tv_95396: 'S2 E1' });
+  assert.equal(rows[0][1][0][2], 'Severance', 'first in Continue browsing though 120 films came after it');
+  assert.ok(!asked.some((u) => u.includes('tv/7')), 'Not interested: not followed');
+});
+
+test('shows: TMDB asked again on the next air date, a month after it ended, every 3 days without a date', async () => {
+  const e = mineEnv();
+  const ago = (days) => Date.now() - days * 86400e3;
+  const row = (id, status, nextAir, days) => e.DB.raw.prepare(`INSERT INTO shows (id, original, last, card, t, imdb, seasons,
+    aired, status, next_air) VALUES (?, 'x', '1:1', '[1,"tv","x","","",0,""]', ?, 'tt', '[]', null, ?, ?)`).run(id, ago(days), status, nextAir);
+  const day = (days) => new Date(ago(days)).toISOString().slice(0, 10);
+  row(1, 'Ended', null, 20); // kept
+  row(2, 'Ended', null, 31); // asked
+  row(3, 'Returning Series', day(-5), 2); // kept: airs in 5 days
+  row(4, 'Returning Series', day(0), 0.5); // asked: airs today
+  row(5, 'Returning Series', null, 2); // kept
+  row(6, 'Returning Series', null, 4); // asked
+  cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([1, 2, 3, 4, 5, 6].map((id) =>
+    bm(id, 'history', 'tv', id, { id, name: `S${id}` }))) });
+  await getMine(e);
+  assert.deepEqual(asked.filter((u) => u.includes('themoviedb')).map((u) => u.match(/tv\/(\d+)/)[1]).sort(), ['2', '4', '6']);
+});
+
+test('mine/book and mine/unbook: My list is CUB\'s Bookmarks (Later too, when removing)', async () => {
+  const e = mineEnv();
+  const answers = {
+    'users/get': { user: { id: 42 } },
+    'bookmarks/dump': cubDump([bm(11, 'wath', 'movie', 1, { id: 603, title: 'Матрица' }), bm(12, 'book', 'movie', 2, { id: 603 })]),
+    'bookmarks/add': { secuses: true },
+    'bookmarks/remove': { secuses: true },
+    'movie/603': { id: 603, title: 'The Matrix', poster_path: '/m.jpg' },
+    'movie/604': { id: 604, title: 'Reloaded', poster_path: '/r.jpg' },
+  };
+  cub(answers);
+  const post = (path) => worker.fetch(new Request('https://w/mine/' + path, { method: 'POST', headers: lampa }), e);
+  assert.equal((await post('book/movie/604')).status, 204);
+  const sent = (method) => asked.filter((u) => u.includes(`bookmarks/${method}`)).map((u) => new URLSearchParams(u.split(' ')[1]));
+  assert.deepEqual(sent('add').map((f) => [f.get('type'), f.get('card_id'), f.get('id')]), [['book', '604', '0']]);
+  cub(answers);
+  assert.equal((await post('unbook/movie/603')).status, 204);
+  assert.deepEqual(sent('remove').map((f) => [f.get('type'), f.get('id')]).sort(), [['book', '12'], ['wath', '11']]);
+  cub(answers);
+  const { rows, mylist } = await (await getMine(e)).json();
+  assert.deepEqual(mylist, ['movie_603']);
+  assert.deepEqual(rows.map(([t]) => t), ['My list']);
+});
+
+test('cron at 04 UTC: New in 4K from CUB\'s 4K list, well-known ones, each kept from its first day; /mine shows the unseen', async () => {
+  const e = { ...mineEnv(), GRADES: { get: async () => ({ movie_3: { g: 1, t: 1 } }) } };
+  const list = { movie: [[1, 500, null], [2, 20, null], [3, 300, 6.1], [4, 10, 7.4], [5, 200, null]], tv: [[9, 150, 7.9]] };
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    if (u.hostname === 'tmdb.cub.best') {
+      const page = Number(u.searchParams.get('page'));
+      const results = page === 1 ? list[u.searchParams.get('cat')].map(([id, votes, imdb]) => ({ id, vote_count: String(votes), imdb_rating: imdb })) : [];
+      return new Response(JSON.stringify({ results }));
+    }
+    const m = u.pathname.match(/\/3\/(movie|tv)\/(\d+)$/);
+    return m ? new Response(JSON.stringify({ id: Number(m[2]), title: `T${m[2]}`, name: `T${m[2]}`, poster_path: '/p.jpg' }))
+      : new Response('{}', { status: 404 });
+  };
+  await worker.scheduled({ cron: '23 * * * *', scheduledTime: Date.UTC(2026, 9, 31, 4, 23) }, e);
+  const kept = e.DB.raw.prepare('SELECT type, id, pos FROM uhd ORDER BY t DESC, pos').all().map((r) => `${r.type}${r.id}`);
+  assert.deepEqual(kept, ['movie1', 'tv9', 'movie3', 'movie4', 'movie5'], '2: 20 votes, IMDb none');
+  list.movie.unshift([6, 900, 8]);
+  await worker.scheduled({ cron: '23 * * * *', scheduledTime: Date.UTC(2026, 10, 1, 4, 23) }, e);
+  cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([bm(1, 'history', 'movie', 1, { id: 1, title: 'Played' })]) });
+  const { rows } = await (await getMine(e)).json();
+  assert.deepEqual(rows.find(([t]) => t === 'New in 4K')[1].map((c) => c[0]), [6, 9, 4, 5], 'newest first; played 1, graded 3 left out');
+});
+
+test('cron other hours: For you from TMDB recommendations of graded films, ranked per account; /mine leaves out played', async () => {
+  const grades = { '42:7': { movie_1: { g: 2, t: 1 }, movie_2: { g: 1, t: 2 }, movie_3: { g: -1, t: 3 }, movie_4: { g: 0, t: 4 },
+    movie_12: { g: 1, t: 5 }, movie_20: { g: 'skip', t: 6 } } };
+  const e = { ...mineEnv(), GRADES: { list: async () => ({ keys: [{ name: '42:7' }] }), get: async (k) => grades[k] ?? null } };
+  const rec = (id, votes = 500, rating = 7, genres = []) => ({ id, title: `R${id}`, poster_path: '/p.jpg', vote_count: votes,
+    vote_average: rating, genre_ids: genres });
+  const recs = {
+    1: [rec(10), rec(11), rec(12), rec(13, 100), rec(14, 500, 5), rec(15, 500, 7, [16])],
+    2: [rec(11), rec(16)],
+    3: [rec(16), rec(17)],
+  };
+  let asks = 0;
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    const r = u.pathname.match(/\/3\/movie\/(\d+)\/recommendations$/);
+    if (r) {
+      asks++;
+      return new Response(JSON.stringify({ results: recs[r[1]] || [] }));
+    }
+    const m = u.pathname.match(/\/3\/(movie|tv)\/(\d+)$/);
+    return m ? new Response(JSON.stringify({ id: Number(m[2]), title: `R${m[2]}`, poster_path: '/p.jpg' })) : new Response('{}', { status: 404 });
+  };
+  await worker.scheduled({ cron: '23 * * * *', scheduledTime: Date.UTC(2026, 9, 31, 5, 23) }, e);
+  assert.equal(asks, 0, 'New in 4K empty: that first');
+  e.DB.raw.prepare("INSERT INTO uhd (type, id, t, pos, card) VALUES ('movie', 99, 1, 0, null)").run();
+  await worker.scheduled({ cron: '23 * * * *', scheduledTime: Date.UTC(2026, 9, 31, 5, 23) }, e);
+  assert.equal(asks, 4, 'Loved, Good, Good, Bad: OK and skip are no seeds');
+  const top = JSON.parse(e.DB.raw.prepare('SELECT cards FROM foryou WHERE who = ?').get('42:7').cards).map((c) => c[0]);
+  assert.deepEqual(top, [11, 10], '12 graded; 13 few votes, 14 low, 15 a cartoon, 16 cancelled by Bad, 17 below 0');
+  await worker.scheduled({ cron: '23 * * * *', scheduledTime: Date.UTC(2026, 9, 31, 6, 23) }, e);
+  assert.equal(asks, 4, 'kept a week');
+  cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([bm(1, 'history', 'movie', 1, { id: 11, title: 'Seen' })]) });
+  e.GRADES.get = async (k) => grades[k] ?? null;
+  const { rows } = await (await getMine(e)).json();
+  assert.deepEqual(rows.find(([t]) => t === 'For you')[1].map((c) => c[0]), [10]);
+});
+
 test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502; nothing to continue → no row', async () => {
   const e = mineEnv();
   cub({ 'users/get': { user: { id: 9 } } });
@@ -759,7 +892,7 @@ test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502;
   cub({ 'users/get': { user: { id: 42 } } });
   assert.equal((await getMine(e)).status, 502);
   cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]) });
-  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {}, new: {} });
+  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {}, new: {}, mylist: [] });
 });
 
 test('mine/history: a film played on the stick goes to the front of Lampa\'s history as Lampa\'s card; again: moved', async () => {
