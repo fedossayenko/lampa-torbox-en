@@ -137,10 +137,10 @@ async function grades(request, env) {
 
 // lampa-native (~/IdeaProjects/lampa-native): the stick's home screen in one small response; the TMDB key
 // stays here (secret TMDB_API_KEY: a 32-hex v3 key or a v4 read access token).
-// GET /home -> {"rows": [[title, [[id, "movie"|"tv", name, year, poster_path, score], ...]], ...]}
-// Same rows as Lampa's TMDB home, with Lampa's English row titles; film names in Russian; score = TMDB × 10.
-// Only what a card draws is sent (TMDB's lists are ~10× bigger, see X-Raw-Bytes), and the stick's HTTP cache
-// keeps it for an hour.
+// GET /home -> {"rows": [[title, [[id, "movie"|"tv", name, year, poster_path, score, backdrop_path], ...]], ...]}
+// Same rows as Lampa's TMDB home, all in English (TMDB en-US); score = TMDB × 10.
+// Only what a card draws is sent, plus the backdrop so a film page loads it together with /card
+// (TMDB's lists are ~10× bigger, see X-Raw-Bytes), and the stick's HTTP cache keeps it for an hour.
 const HOME_ROWS = [
   ['Watching now', 'movie/now_playing'],
   ['Today in trend', 'trending/all/day'],
@@ -152,10 +152,10 @@ const HOME_ROWS = [
   ['Top series', 'tv/top_rated'],
 ];
 
-function tmdb(env, path) {
+function tmdb(env, path, query = '') {
   const key = env.TMDB_API_KEY;
   const v3 = /^[0-9a-f]{32}$/.test(key);
-  const url = `https://api.themoviedb.org/3/${path}?language=ru-RU${v3 ? `&api_key=${key}` : ''}`;
+  const url = `https://api.themoviedb.org/3/${path}?language=en-US${query}${v3 ? `&api_key=${key}` : ''}`;
   return fetch(url, v3 ? {} : { headers: { Authorization: `Bearer ${key}` } });
 }
 
@@ -173,7 +173,7 @@ async function home(request, env) {
         if ((type !== 'movie' && type !== 'tv') || !m.poster_path) continue;
         // never null: the stick's org.json turns it into the text "null"
         items.push([m.id, type, m.title || m.name || '', (m.release_date || m.first_air_date || '').slice(0, 4),
-          m.poster_path, Math.round((m.vote_average || 0) * 10)]);
+          m.poster_path, Math.round((m.vote_average || 0) * 10), m.backdrop_path || '']);
       }
       return [title, items];
     } catch {
@@ -192,6 +192,63 @@ async function home(request, env) {
   });
 }
 
+// GET /card/movie/<tmdb id> or /card/tv/<tmdb id> -> lampa-native's film page, ready to draw (native.test.js):
+// {name, original, line, overview, scores: [[label, text, 0-100]], seasons: [[label, text, 0-100]], people}
+// The verdict comes first in scores: the same weighted average as ratings-patch.js (keep the two in step).
+const NORM = { tomatoes: 1, metacritic: 1, rogerebert: 25, imdb: 10, letterboxd: 20, kp: 10, trakt: 1, tmdb: 1, metacriticuser: 10 };
+const WEIGHTS = { tomatoes: 4, metacritic: 3, imdb: 3, kp: 2, rogerebert: 1, trakt: 1, tmdb: 1, metacriticuser: 1, letterboxd: 0.5 };
+const VERDICTS = [[80, 'Excellent'], [70, 'Good'], [60, 'Decent'], [50, 'Mixed'], [0, 'Poor']];
+const SHOW = [['imdb', 'IMDb', (v) => v.toFixed(1)], ['tomatoes', 'RT', (v) => v + '%'], ['metacritic', 'MC', String],
+  ['letterboxd', 'LB', (v) => v.toFixed(1)]];
+
+async function filmCard(request, env, type, id) {
+  const mdbType = type === 'tv' ? 'show' : 'movie';
+  const [res, r] = await Promise.all([
+    tmdb(env, `${type}/${id}`, '&append_to_response=credits'),
+    fetch(`https://api.mdblist.com/tmdb/${mdbType}/${id}?apikey=${env.MDBLIST_API_KEY}`)
+      .then((x) => (x.ok ? x.json() : {})).then(ratingsOf).catch(() => ({})), // no scores beats no page
+  ]);
+  if (!res.ok) return corsError(request, `TMDB ${res.status}`, res.status === 404 ? 404 : 502);
+  const m = await res.json();
+
+  const scores = [];
+  const got = Object.keys(WEIGHTS).filter((k) => r[k] > 0);
+  if (got.length >= 3) {
+    const sum = (f) => got.reduce((s, k) => s + f(k), 0);
+    const v = Math.round(sum((k) => r[k] * NORM[k] * WEIGHTS[k]) / sum((k) => WEIGHTS[k]));
+    scores.push([VERDICTS.find(([min]) => v >= min)[1], String(v), v]);
+  }
+  if (m.vote_average > 0) scores.push(['TMDB', m.vote_average.toFixed(1), Math.round(m.vote_average * 10)]);
+  for (const [k, label, f] of SHOW) if (r[k] > 0) scores.push([label, f(r[k]), Math.round(r[k] * NORM[k])]);
+
+  const runtime = m.runtime > 0 ? `${m.runtime >= 60 ? Math.floor(m.runtime / 60) + 'h ' : ''}${m.runtime % 60}m` : '';
+  const seasonCount = m.number_of_seasons > 0 ? `${m.number_of_seasons} season${m.number_of_seasons > 1 ? 's' : ''}` : '';
+  const names = (list) => (list || []).map((p) => p.name).join(', ');
+  const makers = type === 'tv' ? ['Created by', names(m.created_by)]
+    : ['Director', names((m.credits?.crew || []).filter((p) => p.job === 'Director'))];
+  const cast = names((m.credits?.cast || []).slice(0, 6));
+  const name = m.title || m.name || '';
+  const original = m.original_title || m.original_name || '';
+
+  return new Response(JSON.stringify({
+    name,
+    original: original === name ? '' : original,
+    line: [(m.release_date || m.first_air_date || '').slice(0, 4), runtime, seasonCount, names(m.genres)]
+      .filter(Boolean).join(' · '),
+    overview: m.overview || '',
+    scores,
+    seasons: (m.seasons || []).filter((s) => s.season_number > 0 && s.vote_average > 0)
+      .map((s) => [`S${s.season_number}`, s.vote_average.toFixed(1), Math.round(s.vote_average * 10)]),
+    people: [makers[1] && `${makers[0]} ${makers[1]}`, cast && `Cast ${cast}`].filter(Boolean).join(' · '),
+  }), {
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'max-age=86400', // a day: MDBList allows 1,000 lookups a day
+      ...corsHeaders(request),
+    },
+  });
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') {
@@ -204,6 +261,8 @@ export default {
 
     if (new URL(request.url).pathname === '/grades' && request.method === 'POST') return grades(request, env);
     if (new URL(request.url).pathname === '/home' && request.method === 'GET') return home(request, env);
+    const film = new URL(request.url).pathname.match(/^\/card\/(movie|tv)\/(\d+)$/);
+    if (film && request.method === 'GET') return filmCard(request, env, film[1], film[2]);
 
     const scores = new URL(request.url).pathname.match(/^\/mdblist\/(movie|show)(?:\/(\d+))?$/);
     if (scores && (scores[2] || request.method === 'POST')) return mdblist(request, env, scores[1], scores[2]);
