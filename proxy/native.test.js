@@ -803,7 +803,8 @@ test('mine/book and mine/unbook: My list is CUB\'s Bookmarks (Later too, when re
   const e = mineEnv();
   const answers = {
     'users/get': { user: { id: 42 } },
-    'bookmarks/dump': cubDump([bm(11, 'wath', 'movie', 1, { id: 603, title: 'Матрица' }), bm(12, 'book', 'movie', 2, { id: 603 })]),
+    'bookmarks/dump': cubDump([bm(11, 'wath', 'movie', 1, { id: 603, title: 'Матрица' }), bm(12, 'book', 'movie', 3, { id: 603 }),
+      bm(13, 'book', 'movie', 2, { id: 605, title: 'Revolutions' })]),
     'bookmarks/add': { secuses: true },
     'bookmarks/remove': { secuses: true },
     'movie/603': { id: 603, title: 'The Matrix', poster_path: '/m.jpg' },
@@ -819,7 +820,7 @@ test('mine/book and mine/unbook: My list is CUB\'s Bookmarks (Later too, when re
   assert.deepEqual(sent('remove').map((f) => [f.get('type'), f.get('id')]).sort(), [['book', '12'], ['wath', '11']]);
   cub(answers);
   const { rows, mylist } = await (await getMine(e)).json();
-  assert.deepEqual(mylist, ['movie_603']);
+  assert.deepEqual(mylist, ['movie_603', 'movie_605'], 'in Bookmarks (newest) and Later: once, at its newest');
   assert.deepEqual(rows.map(([t]) => t), ['My list']);
 });
 
