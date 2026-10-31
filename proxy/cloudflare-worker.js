@@ -481,6 +481,8 @@ async function sources(request, env, kind, imdb, season, episode) {
 // is found in the list), picks the file Torrentio meant (by name, else its index, else the biggest video) and asks
 // for its link. Only for the stick: the route spends the account, so it needs the secret PLAY_TOKEN, which the app
 // keeps in its private storage (lampa-native/set-play-token.sh). Links expire: never cached.
+// &series=<original name> (an episode): also {playlist: [[season, episode, key, file name, link], ...]} from it on,
+// and url is the first one's link (episodesFrom).
 const TORBOX_API = 'https://api.torbox.app/v1/api/torrents/';
 const VIDEO = /\.(mkv|mp4|m4v|avi|mov|webm|ts|m2ts|wmv)$/i;
 
@@ -507,7 +509,7 @@ async function resumePoint(env, tl) {
   }
 }
 
-async function play(request, env, hash) {
+async function play(request, env, ctx, hash) {
   if (!sameSecret(request.headers.get('X-Play-Token'), env.PLAY_TOKEN)) return corsError(request, 'Forbidden.', 403);
   const q = new URL(request.url).searchParams;
   const fileIdx = Number(q.get('file') ?? -1);
@@ -538,12 +540,109 @@ async function play(request, env, hash) {
     // requestdl takes the key as a parameter (it is built for browser redirects); server to server only
     const dl = await torboxApi(env, `requestdl?token=${encodeURIComponent(env.TORBOX_API_KEY)}&torrent_id=${id}&file_id=${file.id}`);
     if (typeof dl?.data !== 'string') return corsError(request, dl?.detail || 'No link.', 502);
-    return new Response(JSON.stringify({ url: dl.data, ...(await resume) }), {
+    const playlist = q.has('series') ? await episodesFrom(request, env, ctx, id, files, file, q.get('series'), dl.data) : [];
+    return new Response(JSON.stringify(playlist.length
+      ? { url: playlist[0][4], ...(await resume), playlist } : { url: dl.data, ...(await resume) }), {
       headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...corsHeaders(request) },
     });
   } catch {
     return corsError(request, 'TorBox unavailable.', 502);
   }
+}
+
+// A series' episode in a file name: S01E09 (S1.E9, S01 E09) or 1x09; null when it says none.
+function episodeOf(name) {
+  const m = String(name).match(/S(\d{1,2})[ ._-]?E(\d{1,3})(?!\d)/i) || String(name).match(/(?:^|[^\d])(\d{1,2})x(\d{2,3})(?!\d)/i);
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+
+// Lampa's timeline key of an episode (as the app's Timeline.key): season, ':' after season 10, episode, original name.
+const episodeKey = ([s, e], original) => lampaHash(`${s}${s > 10 ? ':' : ''}${e}${original}`);
+
+// A series played from a torrent with more episodes (a season's, a series'): the episode asked for and the ones after
+// it in the torrent, in order, for DDD's playlist: DDD goes on to the next by itself (user, 2026-10-31). Each as
+// [season, episode, Lampa's key, file name, link]: the link is this worker's /stream address of that file, the same
+// every time (DDD keeps its own resume point per address), which gets TorBox's link when DDD asks for it (TorBox's
+// links don't live for a whole night of episodes). 30 at most; none when the file names say no episode.
+async function episodesFrom(request, env, ctx, torrent, files, file, original, link) {
+  if (!episodeOf(file.short_name || file.name)) return [];
+  const all = files.filter((f) => VIDEO.test(f.name) && !/\bsample\b/i.test(f.name))
+    .map((f) => ({ f, at: episodeOf(f.short_name || f.name) })).filter((x) => x.at)
+    .sort((a, b) => a.at[0] - b.at[0] || a.at[1] - b.at[1] || b.f.size - a.f.size)
+    .filter((x, i, a) => !i || x.at[0] !== a[i - 1].at[0] || x.at[1] !== a[i - 1].at[1]); // two of one: the bigger
+  const from = all.findIndex((x) => x.f.id === file.id);
+  if (from < 0) return [];
+  const origin = new URL(request.url).origin;
+  await keepLink(ctx, origin, torrent, file.id, link); // DDD's first ask for it costs no TorBox call
+  return Promise.all(all.slice(from, from + 30).map(async (x, i) => {
+    const key = episodeKey(x.at, original);
+    const prev = from + i > 0 ? episodeKey(all[from + i - 1].at, original) : '';
+    const sig = await signed(env, `${torrent}/${x.f.id}/${key}/${prev}`);
+    return [x.at[0], x.at[1], key, x.f.short_name || String(x.f.name).split('/').pop(),
+      `${origin}/stream/${torrent}/${x.f.id}?tl=${key}&prev=${prev}&sig=${sig}`];
+  }));
+}
+
+// HMAC-SHA-256 of a /stream address with PLAY_TOKEN, 32 hex: only addresses /play made are answered.
+async function signed(env, text) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.PLAY_TOKEN), { name: 'HMAC', hash: 'SHA-256' },
+    false, ['sign']);
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(text)));
+  return [...mac.slice(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// TorBox's link of a file kept at this Cloudflare location for half an hour (seeks ask /stream again), and a mark
+// that the episode was streamed, for 3 hours (the next one's first ask then marks it watched).
+const LINK_S = 1800;
+const SEEN_S = 3 * 3600;
+const cacheKey = (origin, what) => new Request(`${origin}/__cache/${what}`);
+async function keepLink(ctx, origin, torrent, fileId, link, key) {
+  if (typeof caches === 'undefined') return;
+  const puts = [caches.default.put(cacheKey(origin, `link/${torrent}/${fileId}`),
+    new Response(link, { headers: { 'Cache-Control': `max-age=${LINK_S}` } }))];
+  if (key) puts.push(caches.default.put(cacheKey(origin, `seen/${key}`), new Response('1', { headers: { 'Cache-Control': `max-age=${SEEN_S}` } })));
+  const all = Promise.all(puts);
+  if (ctx) ctx.waitUntil(all);
+  else await all;
+}
+const cached = async (origin, what) => (typeof caches === 'undefined' ? null
+  : caches.default.match(cacheKey(origin, what)).then((r) => (r ? r.text() : null)));
+
+// GET /stream/<TorBox torrent id>/<file id>?tl=<Lampa key>&prev=<the previous episode's key>&sig=… (from /play) ->
+// 302 to TorBox's link. The episode's first ask (no Range, or from byte 0) while the previous one was streamed in
+// the last 3 hours means DDD went on from it (it asks for the next file only once the current one is all loaded,
+// its last minutes) or the user went on by hand: the previous one is marked watched, so Continue goes on even when
+// DDD never answers the app (the TV turned off, the app killed).
+// ponytail: stopping episode 5 half way and starting 6 by hand within 3 hours marks 5 watched too
+async function stream(request, env, ctx, torrent, fileId) {
+  const q = new URL(request.url).searchParams;
+  const tl = q.get('tl') || '';
+  const prev = q.get('prev') || '';
+  if (!/^\d{1,10}$/.test(tl) || !/^\d{0,10}$/.test(prev)
+    || !sameSecret(q.get('sig') || '', await signed(env, `${torrent}/${fileId}/${tl}/${prev}`))) {
+    return corsError(request, 'Forbidden.', 403);
+  }
+  const origin = new URL(request.url).origin;
+  let link = await cached(origin, `link/${torrent}/${fileId}`);
+  const first = !/^bytes=[1-9]/.test(request.headers.get('Range') || '');
+  if (!link || first) {
+    if (!link) {
+      try {
+        const dl = await torboxApi(env, `requestdl?token=${encodeURIComponent(env.TORBOX_API_KEY)}&torrent_id=${torrent}&file_id=${fileId}`);
+        if (typeof dl?.data !== 'string') return corsError(request, dl?.detail || 'No link.', 502);
+        link = dl.data;
+      } catch {
+        return corsError(request, 'TorBox unavailable.', 502);
+      }
+    }
+    await keepLink(ctx, origin, torrent, fileId, link, tl);
+  }
+  if (first && prev && env.DB && await cached(origin, `seen/${prev}`)) {
+    await env.DB.prepare(`INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?1, 0, 0, 100, ?2)
+      ON CONFLICT (hash) DO UPDATE SET time = timeline.duration, percent = 100, updated = excluded.updated
+      WHERE timeline.percent < 90`).bind(prev, Date.now()).run().catch(() => {}); // no mark beats no film
+  }
+  return new Response(null, { status: 302, headers: { Location: link, 'Cache-Control': 'no-store' } });
 }
 
 // GET /timeline[?hash=<hash>,…] -> {timelines: {hash: {time, duration, percent, updated[, card, season, episode]}}}
@@ -714,7 +813,9 @@ export default {
     }
 
     const link = new URL(request.url).pathname.match(/^\/play\/([0-9a-f]{40})$/);
-    if (link && request.method === 'GET') return play(request, env, link[1]);
+    if (link && request.method === 'GET') return play(request, env, ctx, link[1]);
+    const file = new URL(request.url).pathname.match(/^\/stream\/(\d+)\/(\d+)$/);
+    if (file && /^(GET|HEAD)$/.test(request.method)) return stream(request, env, ctx, file[1], file[2]);
     if (new URL(request.url).pathname === '/timeline') return timeline(request, env);
     if (new URL(request.url).pathname === '/mine' && request.method === 'GET') return mine(request, env);
     const played = new URL(request.url).pathname.match(/^\/mine\/history\/(movie|tv)\/(\d+)$/);
