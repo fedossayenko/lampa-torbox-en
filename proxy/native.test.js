@@ -380,6 +380,8 @@ function d1() {
   const db = new DatabaseSync(':memory:');
   db.exec(readFileSync(new URL('./timeline.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./titles.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('./shows.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('./marks.sql', import.meta.url), 'utf8'));
   const stmt = (sql, args = []) => ({
     bind: (...a) => stmt(sql, a),
     all: async () => ({ results: db.prepare(sql).all(...args) }),
@@ -589,9 +591,7 @@ const getMine = (e, h = lampa) => worker.fetch(new Request('https://w/mine', { h
 
 test('mine: Continue browsing = the history\'s series, newest first, minus Viewed and Thrown, in English', async () => {
   const e = mineEnv();
-  e.DB.raw.prepare("INSERT INTO titles (type, id, card, votes, seen, en) VALUES ('tv', 1399, ?, 1, 1, ' game of thrones ')")
-    .run(JSON.stringify([1399, 'tv', 'Game of Thrones', '2011', '/got-en.jpg', 85, '/b.jpg']));
-  cub({
+  const got = {
     'users/get': { user: { id: 42 } },
     'bookmarks/dump': cubDump([
       bm(1, 'history', 'tv', 100, { id: 1399, name: 'Игра престолов', poster_path: '/got-ru.jpg', source: 'tmdb' }),
@@ -603,19 +603,49 @@ test('mine: Continue browsing = the history\'s series, newest first, minus Viewe
       bm(7, 'book', 'tv', 600, { id: 66, name: 'A bookmark' }),
     ]),
     'tv/83867': { id: 83867, name: 'Andor', first_air_date: '2022-09-21', poster_path: '/andor-en.jpg', vote_average: 8.4 },
-  });
+    'tv/1399': { id: 1399, name: 'Game of Thrones', first_air_date: '2011-04-17', poster_path: '/got-en.jpg', vote_average: 8.5,
+      backdrop_path: '/b.jpg' },
+    'tv/5': { id: 5, name: 'Thrown away', poster_path: '/t.jpg' },
+  };
+  cub(got);
   const res = await getMine(e);
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('Cache-Control'), 'no-store');
-  assert.deepEqual((await res.json()).rows, [['Continue browsing', [
-    [83867, 'tv', 'Andor', '2022', '/andor-en.jpg', 84, ''], // TMDB's English card: not in the index yet
-    [1399, 'tv', 'Game of Thrones', '2011', '/got-en.jpg', 85, '/b.jpg'], // the index's
+  const body = await res.json();
+  assert.deepEqual(body.rows, [['Continue browsing', [
+    [83867, 'tv', 'Andor', '2022', '/andor-en.jpg', 84, ''],
+    [1399, 'tv', 'Game of Thrones', '2011', '/got-en.jpg', 85, '/b.jpg'],
   ]]]);
-  assert.ok(!asked.some((u) => u.includes('tv/1399')), 'a card in the index costs no TMDB call');
-  assert.ok(asked.every((u) => !u.includes('themoviedb') || u.includes('language=en-US') || !u.includes('?')));
-  cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]) });
+  assert.deepEqual(body.marks, { tv_5: 'thrown' });
+  assert.ok(!asked.some((u) => u.includes('tv/5')), 'a thrown series isn\'t asked about');
+  cub(got);
   await getMine(e);
-  assert.equal(e.DB.raw.prepare("SELECT count(*) n FROM titles WHERE id = 83867").get().n, 1, 'kept in the index');
+  assert.ok(!asked.some((u) => u.includes('themoviedb')), 'the series kept a day: TMDB not asked again');
+});
+
+test('mine: a series whose last aired episode is watched leaves; Finish later = Scheduled, out of Continue', async () => {
+  const e = mineEnv();
+  e.DB.raw.prepare('INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, 3000, 3100, 97, 1)')
+    .run(lampaHashOf('18Carrie'));
+  cub({
+    'users/get': { user: { id: 42 } },
+    'bookmarks/dump': cubDump([
+      bm(1, 'history', 'tv', 1, { id: 288673, name: 'Кэрри' }),
+      bm(2, 'history', 'tv', 2, { id: 196322, name: 'Тёмная материя' }),
+      bm(3, 'history', 'tv', 3, { id: 93740, name: 'Основание' }),
+      bm(4, 'scheduled', 'tv', 4, { id: 93740, name: 'Основание' }),
+    ]),
+    'tv/288673': { id: 288673, name: 'Carrie', original_name: 'Carrie', poster_path: '/c.jpg',
+      last_episode_to_air: { season_number: 1, episode_number: 8 } },
+    'tv/196322': { id: 196322, name: 'Dark Matter', original_name: 'Dark Matter', poster_path: '/d.jpg',
+      last_episode_to_air: { season_number: 2, episode_number: 10 } },
+    'tv/93740': { id: 93740, name: 'Foundation', original_name: 'Foundation', poster_path: '/f.jpg',
+      last_episode_to_air: { season_number: 3, episode_number: 10 } },
+  });
+  const { rows, marks } = await (await getMine(e)).json();
+  assert.deepEqual(rows.map(([t, cards]) => [t, cards.map((c) => c[2])]),
+    [['Continue browsing', ['Dark Matter']], ['Finish later', ['Foundation']]]);
+  assert.deepEqual(marks, { tv_93740: 'scheduled' });
 });
 
 test('mine: films being watched join the series (the timeline, by Lampa\'s hash of the original title)', async () => {
@@ -643,7 +673,7 @@ test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502;
   cub({ 'users/get': { user: { id: 42 } } });
   assert.equal((await getMine(e)).status, 502);
   cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]) });
-  assert.deepEqual(await (await getMine(e)).json(), { rows: [] });
+  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {} });
 });
 
 test('mine/history: a film played on the stick goes to the front of Lampa\'s history as Lampa\'s card; again: moved', async () => {
@@ -673,6 +703,40 @@ test('mine/history: a film played on the stick goes to the front of Lampa\'s his
   assert.equal((await post('tv/1399')).status, 502, 'CUB refused');
   cub({ 'users/get': { user: { id: 9 } } });
   assert.equal((await post('tv/1399')).status, 401);
+});
+
+test('mine/<mark>: kept in D1 per account and profile (CUB\'s marks need Premium); one at a time; none removes it', async () => {
+  const e = mineEnv();
+  const answers = {
+    'users/get': { user: { id: 42 } },
+    'bookmarks/dump': cubDump([
+      bm(1, 'history', 'tv', 3, { id: 1399, name: 'Игра престолов' }), bm(2, 'history', 'movie', 2, { id: 7340, title: 'Кэрри' }),
+      bm(3, 'history', 'tv', 1, { id: 196322, name: 'Тёмная материя' }),
+    ]),
+    'tv/1399': { id: 1399, name: 'Game of Thrones', poster_path: '/g.jpg' },
+    'tv/196322': { id: 196322, name: 'Dark Matter', poster_path: '/d.jpg' },
+  };
+  const post = (path, h = lampa) => worker.fetch(new Request('https://w/mine/' + path, { method: 'POST', headers: h }), e);
+  const titles = async () => { cub(answers); return (await (await getMine(e)).json()); };
+  cub(answers);
+  assert.equal((await post('scheduled/tv/1399')).status, 204);
+  assert.ok(!asked.some((u) => u.includes('bookmarks/')), 'nothing asked of CUB');
+  cub(answers);
+  assert.equal((await post('thrown/movie/7340')).status, 204);
+  let body = await titles();
+  assert.deepEqual(body.rows.map(([t, c]) => [t, c.map((x) => x[2])]), [['Continue browsing', ['Dark Matter']], ['Finish later', ['Game of Thrones']]]);
+  assert.deepEqual(body.marks, { tv_1399: 'scheduled', movie_7340: 'thrown' });
+  cub(answers);
+  await post('viewed/tv/1399'); // one at a time
+  cub(answers);
+  await post('none/movie/7340');
+  body = await titles();
+  assert.deepEqual(body.marks, { tv_1399: 'viewed' });
+  assert.deepEqual(body.rows.map(([t]) => t), ['Continue browsing']);
+  cub({ ...answers, 'users/get': { user: { id: 42 } } });
+  assert.equal((await post('scheduled/tv/1399', { 'X-Cub-Token': 'other', 'X-Cub-Profile': '8' })).status, 204);
+  assert.deepEqual((await titles()).marks, { tv_1399: 'viewed' }, 'another profile\'s marks are its own');
+  assert.equal((await post('look/tv/1399')).status, 400, 'not one of the app\'s marks');
 });
 
 // Lampa's Utils.hash, as the app's Timeline.key: Java's String.hashCode, positive.
