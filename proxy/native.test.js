@@ -1408,3 +1408,15 @@ test('a genre page: popular, best rated and new films, then series; a genre seri
   assert.ok(queries.every((q) => q.startsWith('discover/movie')));
   assert.equal((await page('nope')).status, 404);
 });
+
+test('find: a title by its IMDb id (films first), null when TMDB has none', async () => {
+  tmdbAnswers({ 'find/tt0133093': { movie_results: [{ id: 603, title: 'The Matrix', release_date: '1999-03-31',
+    poster_path: '/m.jpg', vote_average: 8.2 }], tv_results: [] },
+  'find/tt0903747': { movie_results: [], tv_results: [{ id: 1396, name: 'Breaking Bad', first_air_date: '2008-01-20',
+    poster_path: '/b.jpg' }] }, 'find/tt0000001': { movie_results: [], tv_results: [] } });
+  const find = async (id) => (await worker.fetch(new Request('https://w/find/' + id), env)).json();
+  assert.deepEqual((await find('tt0133093')).card.slice(0, 4), [603, 'movie', 'The Matrix', '1999']);
+  assert.deepEqual((await find('tt0903747')).card.slice(0, 2), [1396, 'tv']);
+  assert.equal((await find('tt0000001')).card, null);
+  assert.ok(asked[0].includes('external_source=imdb_id'));
+});
