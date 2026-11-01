@@ -1032,22 +1032,34 @@ async function shows(env, ids) {
   return have;
 }
 
+// Your place in a series: the furthest episode watched to 90 % (w: [season, episode, when], null: none) and how many
+// aired after it (left: its poster's "26 ep left", user 2026-11-01). s: shows(); done: the timeline's points past
+// 70 % by hash.
+function place(s, done) {
+  const seasons = JSON.parse(s.seasons || '[]');
+  const [ls, le] = s.last.split(':').map(Number);
+  let w = null;
+  let left = 0;
+  for (const [n, count] of seasons) {
+    for (let e = 1; e <= count && (n < ls || (n === ls && e <= le)); e++) {
+      const p = done.get(episodeKey([n, e], s.original));
+      if (p && p.percent >= 90) {
+        w = [n, e, p.updated];
+        left = 0;
+      } else left++;
+    }
+  }
+  return { seasons, ls, le, w, left };
+}
+
 // New episodes (user 2026-10-31): the episode after your furthest watched one aired in the last NEW_DAYS, after you
-// watched that one: [season, episode], else null. s: shows(); done: the timeline's points past 70 % by hash.
+// watched that one: [season, episode], else null. s: shows(); at: its place().
 // ponytail: an air date is known for a season's first episode and the last aired one only (TMDB's series answer),
 // so with two or more aired since (a week missed) there is no label until you catch up; upgrade: TMDB's
 // tv/<id>/season/<n> for the episode's own date.
 const NEW_DAYS = 30;
-function nextNew(s, done, now) {
-  const seasons = JSON.parse(s.seasons || '[]');
-  const [ls, le] = s.last.split(':').map(Number);
-  let w = null; // the furthest watched: [season, episode, when]
-  for (const [n, count] of seasons) {
-    for (let e = 1; e <= count && (n < ls || (n === ls && e <= le)); e++) {
-      const p = done.get(episodeKey([n, e], s.original));
-      if (p && p.percent >= 90) w = [n, e, p.updated];
-    }
-  }
+function nextNew(s, at, now) {
+  const { seasons, ls, le, w } = at;
   if (!w) return null;
   const next = w[1] < (seasons.find(([n]) => n === w[0])?.[1] || 0) ? [w[0], w[1] + 1] : [w[0] + 1, 1];
   if (next[0] > ls || (next[0] === ls && next[1] > le)) return null; // not aired yet
@@ -1177,7 +1189,8 @@ const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 // every film's mark and grade (the film page's ⋯ and ★ show them; grades: KV GRADES as /grades, "skip" = Didn't
 // watch / not mine), the series with a new episode out (nextNew, freshOut): first in Continue browsing, and "mylist":
 // ["movie_603", ...], what My list holds (the film page's ⋯ adds or removes), "left": {"movie_603": 4000, ...}, the
-// seconds left of each film started (3 min in, under 90 %, not graded), for its poster, and "seen": ["movie_603", ...],
+// seconds left of each film started (3 min in, under 90 %, not graded), for its poster, and "tv_1399": "26 ep", a
+// series' aired episodes after your furthest watched one (none when caught up), and "seen": ["movie_603", ...],
 // the films in the history played to 90 % (graded or not): a genre page hides them with the graded and marked ones.
 // A graded film is watched (user 2026-11-01): out of My list, Finish later and Continue browsing; a graded series may be
 // watched on (Foundation: Good after season 1), so only "not mine" (skip) takes it out.
@@ -1259,9 +1272,10 @@ async function mine(request, env) {
   // a series once you're caught up: its last aired episode past 70 % (not one episode of it: user 2026-10-31)
   const watched = (h) => (h.type === 'movie' ? done.has(hash(h.card)) : done.has(lastKey(h)));
   const rate = recent.filter((h) => !(`${h.type}_${h.card.id}` in grades) && watched(h)).slice(0, 20);
+  const places = new Map([...info].filter(([, s]) => s.last).map(([id, s]) => [id, place(s, done)]));
   const newOnes = followed.map((h) => {
     const s = info.get(Number(h.card.id));
-    const next = s && s.imdb && s.last ? nextNew(s, done, Date.now()) : null;
+    const next = s && s.imdb && places.has(s.id) ? nextNew(s, places.get(s.id), Date.now()) : null;
     return next && { h, next, imdb: s.imdb, key: `${h.card.id}/${next[0]}/${next[1]}` };
   }).filter(Boolean);
   const out = await freshOut(env, newOnes);
@@ -1300,6 +1314,9 @@ async function mine(request, env) {
       const p = points.get(hash(h.card));
       left[`movie_${h.card.id}`] = p.duration - p.time;
     }
+  }
+  for (const [id, at] of places) {
+    if (at.w && at.left && grades[`tv_${id}`] !== 'skip' && !['viewed', 'thrown'].includes(marks[`tv_${id}`])) left[`tv_${id}`] = `${at.left} ep`;
   }
   const seen = all.filter((b) => b.card_type === 'movie').map((b) => [keyOf(b), parsed(b)])
     .filter(([, h]) => h && done.get(hash(h.card))?.percent >= 90).map(([k]) => k);
