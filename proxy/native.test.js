@@ -878,6 +878,35 @@ test('mine: My list and Finish later leave out what you watched (a film 90 % or 
   assert.deepEqual(mylist.sort(), ['movie_1', 'movie_2', 'movie_3', 'tv_10', 'tv_9'], 'still in it: ⋯ can remove them');
 });
 
+// A grade says a film is watched (user 2026-11-01): it leaves your lists. A series graded may be watched on (Foundation:
+// Good after season 1), so only "not mine" takes it out. Films started say how long is left, for their posters.
+test('mine: a graded film leaves My list, Finish later and Continue browsing; a series only when not mine; "left"', async () => {
+  const e = mineEnv();
+  e.GRADES = { get: async (k) => (k === '42:7' ? { movie_1: { g: 2, t: 1 }, movie_2: { g: 'skip', t: 1 },
+    movie_3: { g: 0, t: 1 }, tv_9: { g: 1, t: 1 }, tv_10: { g: 'skip', t: 1 } } : null) };
+  const point = (title, time, percent) => e.DB.raw.prepare(
+    'INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, ?, 7000, ?, 1)').run(lampaHashOf(title), time, percent);
+  point('Graded half', 3000, 43);
+  point('Half', 3000, 43);
+  point('Later half', 1000, 14);
+  const film = (id, original) => ({ id, title: original, original_title: original, poster_path: `/${id}.jpg` });
+  const show = (id, name) => ({ id, name, original_name: name, poster_path: `/${id}.jpg` });
+  cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([
+    bm(1, 'book', 'movie', 1, film(1, 'Loved')), bm(2, 'scheduled', 'movie', 2, film(2, 'Not mine')),
+    bm(3, 'history', 'movie', 3, film(3, 'Graded half')), bm(4, 'history', 'movie', 4, film(4, 'Half')),
+    bm(5, 'book', 'tv', 5, show(9, 'Good show')), bm(6, 'book', 'tv', 6, show(10, 'Not my show')),
+    bm(7, 'history', 'movie', 7, film(5, 'Later half')), bm(8, 'scheduled', 'movie', 8, film(5, 'Later half')),
+  ]),
+  'tv/9': { ...show(9, 'Good show'), status: 'Returning Series', last_episode_to_air: { season_number: 1, episode_number: 2 } },
+  'tv/10': { ...show(10, 'Not my show'), status: 'Returning Series', last_episode_to_air: { season_number: 1, episode_number: 2 } } });
+  const { rows, left } = await (await getMine(e)).json();
+  const row = (title) => (rows.find(([t]) => t === title) || [, []])[1].map((c) => c[0]);
+  assert.deepEqual(row('My list'), [9]);
+  assert.deepEqual(row('Finish later'), [5]);
+  assert.deepEqual(row('Continue browsing'), [4]);
+  assert.deepEqual(left, { movie_4: 4000, movie_5: 6000 }, 'graded: none; Finish later: its time too');
+});
+
 test('cron at 04 UTC: New in 4K from CUB\'s 4K list, well-known ones, each kept from its first day; /mine shows the unseen', async () => {
   const e = { ...mineEnv(), GRADES: { get: async () => ({ movie_3: { g: 1, t: 1 } }) } };
   const list = { movie: [[1, 500, null], [2, 20, null], [3, 300, 6.1], [4, 10, 7.4], [5, 200, null]], tv: [[9, 150, 7.9]] };
@@ -947,7 +976,7 @@ test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502;
   cub({ 'users/get': { user: { id: 42 } } });
   assert.equal((await getMine(e)).status, 502);
   cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]) });
-  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {}, new: {}, mylist: [] });
+  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {}, new: {}, mylist: [], left: {} });
 });
 
 test('mine/history: a film played on the stick goes to the front of Lampa\'s history as Lampa\'s card; again: moved', async () => {
