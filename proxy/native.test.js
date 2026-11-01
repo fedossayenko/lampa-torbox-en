@@ -838,6 +838,8 @@ test('mine: a new episode out with RU/UA audio goes first in Continue browsing, 
   assert.deepEqual(first.rows[0][1].map((c) => c[2]), ["Foundation", "Widow's Bay", 'Euphoria', 'Peaky Blinders',
     'Dark Matter'], 'Severance: watched to its last aired');
   assert.deepEqual(first.new, { tv_93740: 'S3 E5' }, 'Dark Matter S2 E1: English only so far');
+  assert.deepEqual(first.left, { tv_93740: '1 ep', tv_196322: '1 ep', tv_60574: '9 ep', tv_85552: '1 ep',
+    tv_270476: '9 ep' }, 'aired after the furthest watched (Peaky Blinders: S1 E4-6 and season 2); Severance: none');
   assert.deepEqual(asked.filter((u) => u.includes('torrentio')).sort(),
     ['torrentio.strem.fun/stream/series/tt0804484:3:5.json', 'torrentio.strem.fun/stream/series/tt12688584:2:1.json']);
   cub(answers);
