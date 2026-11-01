@@ -414,6 +414,19 @@ const GENRE_PAGES = {
   'science-fiction': [878, 10765], thriller: [53, 0], war: [10752, 10768], western: [37, 37],
 };
 
+// GET /find/<IMDb id> -> {card: Home card | null}: the film or series with that IMDb id (TMDB's find), for
+// importing IMDb's ratings export (proxy/imdb-import.py) into the grades. A day in the edge cache.
+async function findImdb(request, env, imdb) {
+  const res = await tmdb(env, `find/${imdb}`, '&external_source=imdb_id');
+  if (!res.ok) return corsError(request, `TMDB ${res.status}`, 502);
+  const o = await res.json();
+  const m = (o.movie_results || [])[0] || (o.tv_results || [])[0];
+  const card = m ? cardOf(m, (o.movie_results || [])[0] ? 'movie' : 'tv') : null;
+  return new Response(JSON.stringify({ card }), {
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'max-age=86400', ...corsHeaders(request) },
+  });
+}
+
 async function genrePage(request, env, slug) {
   const ids = GENRE_PAGES[slug];
   if (!ids) return corsError(request, 'No such genre.', 404);
@@ -1454,6 +1467,8 @@ export default {
     }
     const actor = new URL(request.url).pathname.match(/^\/person\/(\d+)$/);
     if (actor && request.method === 'GET') return edgeCached(request, ctx, () => personPage(request, env, actor[1]));
+    const imdb = new URL(request.url).pathname.match(/^\/find\/(tt\d{1,10})$/);
+    if (imdb && request.method === 'GET') return edgeCached(request, ctx, () => findImdb(request, env, imdb[1]));
     const genre = new URL(request.url).pathname.match(/^\/genre\/([a-z-]+)$/);
     if (genre && request.method === 'GET') return edgeCached(request, ctx, () => genrePage(request, env, genre[1]));
     const src = new URL(request.url).pathname.match(/^\/streams\/(movie|series)\/(tt\d+)(?:\/(\d+)\/(\d+))?$/);
