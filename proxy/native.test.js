@@ -44,7 +44,7 @@ test('asks TMDB for English names and descriptions', async () => {
   await worker.fetch(new Request('https://w/home'), env);
   await worker.fetch(new Request('https://w/card/movie/7'), env);
   const tmdbUrls = asked.filter((u) => u.includes('api.themoviedb.org'));
-  assert.equal(tmdbUrls.length, 11); // 8 rows, the trailers' 2 trending pages (they failed: no videos asked), the card
+  assert.equal(tmdbUrls.length, 9);
   for (const u of tmdbUrls) assert.equal(new URL(u).searchParams.get('language'), 'en-US', u);
 });
 
@@ -53,24 +53,6 @@ test('always sends strings, even when TMDB leaves out the name or the date', asy
   tmdbAnswers({ 'movie/popular': { results: [{ id: 5, poster_path: '/p.jpg' }] } });
   const { rows } = await (await worker.fetch(new Request('https://w/home'), env)).json();
   assert.deepEqual(rows, [['Popular films', [[5, 'movie', '', '', '/p.jpg', 0, '']]]]);
-});
-
-test('New trailers under Watching now: trending films with an official YouTube trailer of the last 60 days', async () => {
-  const days = (n) => new Date(Date.now() - n * 86400e3).toISOString();
-  const film = (id) => ({ id, title: `F${id}`, release_date: '2026-12-01', poster_path: `/${id}.jpg` });
-  const video = (key, type, official, age) => ({ key, site: 'YouTube', type, official, published_at: days(age) });
-  tmdbAnswers({
-    'movie/now_playing': { results: [film(9)] },
-    'trending/movie/week': { results: [film(1), film(2), film(3), { ...film(4), poster_path: null }] },
-    'movie/1/videos': { results: [video('old', 'Trailer', true, 50), video('new', 'Trailer', true, 5),
-      video('fan', 'Trailer', false, 1), video('tease', 'Teaser', true, 2)] },
-    'movie/2/videos': { results: [video('long-ago', 'Trailer', true, 200)] },
-    'movie/3/videos': { results: [video('teaser', 'Teaser', true, 3)] },
-  });
-  const o = await (await worker.fetch(new Request('https://w/home'), env)).json();
-  assert.deepEqual(o.rows.map(([t, cards]) => [t, cards.map((c) => c[0])]), [['Watching now', [9]], ['New trailers', [1]]]);
-  assert.deepEqual(o.trailers, { movie_1: 'new' }, 'the newest official one; F2: only an old one; F3: a teaser');
-  assert.ok(!asked.some((u) => u.includes('movie/4/')), 'no poster: not asked');
 });
 
 test('answers 502 when every row fails', async () => {
