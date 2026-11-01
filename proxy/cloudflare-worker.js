@@ -1074,7 +1074,10 @@ const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 // {"tv_93740": "S3 E5", ...}}: the rows of Lampa's CUB home that are yours, for the top of lampa-native's Home,
 // every film's mark and grade (the film page's ⋯ and ★ show them; grades: KV GRADES as /grades, "skip" = Didn't
 // watch / not mine), the series with a new episode out (nextNew, freshOut): first in Continue browsing, and "mylist":
-// ["movie_603", ...], what My list holds (the film page's ⋯ adds or removes).
+// ["movie_603", ...], what My list holds (the film page's ⋯ adds or removes), and "left": {"movie_603": 4000, ...}, the
+// seconds left of each film started (5 min in, under 90 %, not graded), for its poster.
+// A graded film is watched (user 2026-11-01): out of My list, Finish later and Continue browsing; a graded series may be
+// watched on (Foundation: Good after season 1), so only "not mine" (skip) takes it out.
 // Rows: Continue browsing, For you, New in 4K (both made by the hourly cron), My list, Finish later, Rate what you watched.
 // Continue browsing: Lampa's (favorite.js continues): the series in the history, newest first, 19 at most; here
 // also the films being watched (5 min in, under 90 %: the timeline; shorter is a try of a release, its sound or a
@@ -1134,15 +1137,20 @@ async function mine(request, env) {
     const s = info.get(Number(h.card.id));
     return s && s.last ? episodeKey(s.last.split(':').map(Number), s.original) : null;
   };
-  const keys = [...history.filter((h) => h.type === 'movie').map((h) => hash(h.card)), ...series.map(lastKey).filter(Boolean)];
+  const keys = [...recent.filter((h) => h.type === 'movie').map((h) => hash(h.card)), ...series.map(lastKey).filter(Boolean)];
   const points = new Map(keys.length && env.DB ? (await env.DB.prepare(
-    'SELECT hash, time, percent FROM timeline WHERE hash IN (SELECT value FROM json_each(?))')
+    'SELECT hash, time, duration, percent FROM timeline WHERE hash IN (SELECT value FROM json_each(?))')
     .bind(JSON.stringify(keys)).all().then((r) => r.results).catch(() => [])).map((p) => [p.hash, p]) : []);
-  const going = (h) => {
-    if (h.type === 'tv') return series.includes(h) && !(points.get(lastKey(h))?.percent >= 90);
-    const p = points.get(hash(h.card));
-    return p && p.time >= FILM_STARTED_S && p.percent < 90;
+  const gradedOut = (h) => {
+    const g = grades[`${h.type}_${h.card.id}`];
+    return g !== undefined && (h.type === 'movie' || g === 'skip');
   };
+  const started = (h) => {
+    const p = points.get(hash(h.card));
+    return p && p.time >= FILM_STARTED_S && p.percent < 90 && !gradedOut(h);
+  };
+  const going = (h) => (h.type === 'tv' ? series.includes(h) && !gradedOut(h) && !(points.get(lastKey(h))?.percent >= 90)
+    : started(h));
   // ponytail: every point past 70 % read (~300 in 2026-10, one small query)
   const done = new Map((await db('SELECT hash, percent, updated FROM timeline WHERE percent >= 70')).map((p) => [p.hash, p]));
   // a series once you're caught up: its last aired episode past 70 % (not one episode of it: user 2026-10-31)
@@ -1156,13 +1164,13 @@ async function mine(request, env) {
   const out = await freshOut(env, newOnes);
   const fresh = {};
   for (const x of newOnes) if (out.has(x.key)) fresh[`tv_${x.h.card.id}`] = `S${x.next[0]} E${x.next[1]}`;
-  const isNew = (h) => h.type === 'tv' && `tv_${h.card.id}` in fresh;
+  const isNew = (h) => h.type === 'tv' && `tv_${h.card.id}` in fresh && !gradedOut(h);
   const continuing = [...followed.filter(isNew), ...history.filter((h) => going(h) && !isNew(h))].slice(0, 19);
   // English cards: a series' from shows, the others from the search index or TMDB (15 a request at most)
   // My list and Finish later without what you watched (user 2026-10-31), here or in Lampa: a film 90 % or marked
   // Watched it, a series that ended, to its last episode; one running on stays (a new season may come). Hidden, not
   // removed from CUB (Lampa's Bookmarks keep them; ⋯ removes).
-  const finished = (h) => marks[`${h.type}_${h.card.id}`] === 'viewed' || (h.type === 'movie'
+  const finished = (h) => gradedOut(h) || marks[`${h.type}_${h.card.id}`] === 'viewed' || (h.type === 'movie'
     ? done.get(hash(h.card))?.percent >= 90
     : ['Ended', 'Canceled'].includes(info.get(Number(h.card.id))?.status) && done.get(lastKey(h))?.percent >= 90);
   const lists = [['Continue browsing', continuing], ['My list', mylist.filter((h) => !finished(h))],
@@ -1183,7 +1191,14 @@ async function mine(request, env) {
     ...lists.slice(1).map(([title, l]) => [title, l.map(cardFor)])]) {
     if (cards.length) rows.push([title, cards]);
   }
-  return new Response(JSON.stringify({ rows, marks, grades, new: fresh, mylist: listed.map(keyOf) }), {
+  const left = {};
+  for (const h of recent) {
+    if (h.type === 'movie' && !['viewed', 'thrown'].includes(marks[`movie_${h.card.id}`]) && started(h)) {
+      const p = points.get(hash(h.card));
+      left[`movie_${h.card.id}`] = p.duration - p.time;
+    }
+  }
+  return new Response(JSON.stringify({ rows, marks, grades, new: fresh, mylist: listed.map(keyOf), left }), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(request) },
   });
 }
