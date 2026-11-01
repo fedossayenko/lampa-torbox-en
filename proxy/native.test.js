@@ -291,6 +291,31 @@ test('badges: resolution, Dolby Vision, HDR, REMUX, codec, audio; in that order,
   assert.deepEqual(body.streams.map((r) => r[3]), cases.map(([, badges]) => badges)); // equal sizes: Torrentio's order
 });
 
+// Whole Blu-ray discs (BDMV folders of .m2ts) don't play in DDD (UnrecognizedInputFormat): last, badged "Disc".
+// Real names from The Dark Knight's, Interstellar's and Oppenheimer's lists.
+test('discs: last whatever their size, "Disc" first among their badges; remuxes and encodes aren\'t discs', async () => {
+  const row = (title, size, filename) => ({ name: 'Torrentio\n4k', title: `${title}\n👤 1 💾 ${size} ⚙️ x`,
+    infoHash: hash(size.length), behaviorHints: { filename } });
+  const names = [
+    ['Темный рыцарь / The Dark Knight [2008 UHD Blu-ray disc 2160p] [IMAX Edition] [EUR] Dub + Sub Rus Eng', '67.89 GB'],
+    ['Interstellar.2014.2160p.BluRay.HEVC.DTS-HD.MA.5.1-TASTED', '84.1 GB'],
+    ['Interstellar.2014.2160p.4K.UHD.Full.Blu-Ray.HEVC.DTS-HD-MassModz', '84.2 GB'],
+    ['OPPENHEIMER.2023.4K.UHD.COMPLETE.BLURAY-MassModz', '92.02 GB'],
+    ['Oppenheimer (CZ/EN)(2023)[2160p][HDR10+/DoVi][IMAX][REMUX][HEVC]', '107.8 GB'],
+    ['Interstellar.2014.1080p.BluRay.REMUX-DDB', '33.26 GB'],
+    ['Interstellar (2014) IMAX Complete (2160p BluRay x265 HEVC 10bit SDR AAC 5.1 Joy) [UTR]', '11.3 GB'],
+    ['Interstellar (2014) IMAX (1080p BluRay x265 HEVC 10bit AAC 5.1 Q22 Joy) [UTR]', '5.5 GB'],
+    ['Movie.2020.1080p.BluRay.HEVC.10bit.AAC-GRP', '3.1 GB'], // a small HEVC encode named like a disc
+    ['Interstellar.2014.2160p.BluRay.HEVC.HDR.DTS-HD.MA.5.1.IVA', '89.29 GB', 'Interstellar.2014.2160p.IVA.mkv'], // one file
+  ];
+  tmdbAnswers({ '/stream/movie/tt1.json': { streams: names.map(([t, s, f], i) => ({ ...row(t, s, f), infoHash: hash(i) })) } });
+  const body = await (await streams('movie/tt1', env)).json();
+  const all = [...body.streams, ...(await (await streams('movie/tt1?from=6', env)).json()).streams];
+  assert.deepEqual(all.map((r) => r[4]),
+    ['107.8 GB', '89.29 GB', '33.26 GB', '11.3 GB', '5.5 GB', '3.1 GB', '92.02 GB', '84.2 GB', '84.1 GB', '67.89 GB']);
+  assert.deepEqual(all.map((r) => r[3][0] === 'Disc'), [...Array(6).fill(false), ...Array(4).fill(true)]);
+});
+
 // Play: a TorBox link for one file of a torrent, for DDD. Only with the stick's token: the route adds torrents to
 // the TorBox account and hands out its download links.
 const playEnv = { ...streamsEnv, PLAY_TOKEN: 'stick-token' };
