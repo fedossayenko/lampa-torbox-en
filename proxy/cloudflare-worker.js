@@ -334,7 +334,7 @@ async function filmCard(request, env, type, id) {
     .sort((a, b) => (a.release_date || '9').localeCompare(b.release_date || '9')).map((p) => cardOf(p, 'movie'));
 
   const photos = (m.credits?.cast || []).filter((p) => p.profile_path).slice(0, 12)
-    .map((p) => [p.name || '', p.character || '', p.profile_path]);
+    .map((p) => [p.name || '', p.character || '', p.profile_path, p.id || 0]); // id: OK opens /person
   return new Response(JSON.stringify({
     name,
     original: original === name ? '' : original,
@@ -359,6 +359,43 @@ async function filmCard(request, env, type, id) {
       'Cache-Control': 'max-age=86400', // a day: MDBList allows 1,000 lookups a day
       ...corsHeaders(request),
     },
+  });
+}
+
+// GET /person/<tmdb id> -> lampa-native's actor page (OK on a cast photo; its name and photo come from the cast):
+// {line, about, rows: [[title, [Home card]]]}. Rows: Best rated, then the films and the series, newest first; a row with nothing
+// is left out. Rows, not a sort switch: both orders on one page, the remote only goes down. Best rated is IMDb's
+// weighted rating: votes pull a score toward 6.5 until there are a few hundred, so a 9.5 from 12 votes doesn't top
+// a 7.0 from 4,000. Left out everywhere: not out yet (nothing to watch; they led Scarlett Johansson's films five
+// deep), playing themselves or archive footage, talk, news and reality shows, a series they are in once (a guest:
+// The Simpsons topped Pierce Brosnan's best), no poster, a title twice (two characters). One TMDB call.
+const NOT_A_ROLE = /^(self|himself|herself|themselves)\b|archive footage/i;
+const TALK = [10763, 10764, 10767]; // TMDB's News, Reality, Talk
+
+async function personPage(request, env, id) {
+  const res = await tmdb(env, `person/${id}`, '&append_to_response=combined_credits');
+  if (!res.ok) return corsError(request, `TMDB ${res.status}`, res.status === 404 ? 404 : 502);
+  const p = await res.json();
+  const today = new Date().toISOString().slice(0, 10);
+  const date = (m) => m.release_date || m.first_air_date || '9999';
+  const roles = [...new Map((p.combined_credits?.cast || [])
+    .filter((m) => m.poster_path && date(m) <= today && !NOT_A_ROLE.test(m.character || '')
+      && !(m.genre_ids || []).some((g) => TALK.includes(g)) && !(m.media_type === 'tv' && m.episode_count < 2))
+    .map((m) => [m.media_type + m.id, m])).values()];
+  const newest = (type) => roles.filter((m) => m.media_type === type)
+    .sort((a, b) => date(b).localeCompare(date(a))).map((m) => cardOf(m, type));
+  const weighted = (m) => (m.vote_count * m.vote_average + 500 * 6.5) / (m.vote_count + 500);
+  const best = roles.filter((m) => m.vote_count > 0).sort((a, b) => weighted(b) - weighted(a)).slice(0, 20)
+    .map((m) => cardOf(m, m.media_type));
+  const born = p.birthday || '';
+  const age = born && Number(today.slice(0, 4)) - Number(born.slice(0, 4)) - (today.slice(5) < born.slice(5) ? 1 : 0);
+  const life = p.deathday ? `${born.slice(0, 4)}–${p.deathday.slice(0, 4)}` : born && `Born ${born.slice(0, 4)} (${age})`;
+  return new Response(JSON.stringify({
+    line: [life, p.place_of_birth].filter(Boolean).join(' · '),
+    about: p.biography || '',
+    rows: [['Best rated', best], ['Films', newest('movie')], ['Series', newest('tv')]].filter(([, cards]) => cards.length),
+  }), {
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'max-age=86400', ...corsHeaders(request) },
   });
 }
 
@@ -1371,6 +1408,8 @@ export default {
     if (film && request.method === 'GET') {
       return edgeCached(request, ctx, () => filmCard(request, env, film[1], film[2]));
     }
+    const actor = new URL(request.url).pathname.match(/^\/person\/(\d+)$/);
+    if (actor && request.method === 'GET') return edgeCached(request, ctx, () => personPage(request, env, actor[1]));
     const src = new URL(request.url).pathname.match(/^\/streams\/(movie|series)\/(tt\d+)(?:\/(\d+)\/(\d+))?$/);
     if (src && /^(GET|POST)$/.test(request.method) && (src[1] === 'series') === Boolean(src[3])) {
       return sources(request, env, src[1], src[2], src[3], src[4]);
