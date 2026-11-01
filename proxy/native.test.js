@@ -757,8 +757,9 @@ test('mine: films being watched (3 min in) join the series (the timeline, by Lam
     bm(3, 'history', 'movie', 3, film(9, 'Opened')), bm(4, 'history', 'movie', 4, film(10, 'Tried')),
     bm(5, 'history', 'movie', 5, film(11, 'Started')),
   ]) });
-  const { rows } = await (await getMine(e)).json();
+  const { rows, seen } = await (await getMine(e)).json();
   assert.deepEqual(rows[0][1].map((c) => c[0]), [11, 603]); // newest first
+  assert.deepEqual(seen, ['movie_8']); // played to 95 %: a genre page hides it
   assert.equal(rows[0][1][1][2], 'RU The Matrix', 'TMDB down: the card CUB kept');
 });
 
@@ -1040,7 +1041,8 @@ test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502;
   cub({ 'users/get': { user: { id: 42 } } });
   assert.equal((await getMine(e)).status, 502);
   cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]) });
-  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {}, new: {}, mylist: [], left: {} });
+  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {}, new: {}, mylist: [], left: {},
+    seen: [] });
 });
 
 test('mine/history: a film played on the stick goes to the front of Lampa\'s history as Lampa\'s card; again: moved', async () => {
@@ -1402,6 +1404,7 @@ test('a genre page: popular, best rated and new films, then series; a genre seri
   assert.deepEqual(o.rows[0][1].map((c) => c[0]), [1]);
   assert.deepEqual(o.rows[3][1].map((c) => c[0]), [101]);
   assert.ok(queries.includes('discover/tv vote_average.desc 10765')); // Sci-Fi & Fantasy for series
+  assert.equal(queries.length, 30); // 5 pages a row: 100 to hide the watched ones from
   queries.length = 0;
   const horror = await (await page('horror')).json();
   assert.equal(horror.rows.length, 3);
