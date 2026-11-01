@@ -401,7 +401,9 @@ async function personPage(request, env, id) {
 
 // GET /genre/<slug> -> lampa-native's genre page (Search before typing: OK on a genre), as /person's:
 // {line, about, rows}. Rows: New, Popular and Best rated films, then the same for series; TMDB keeps films' and
-// series' genres apart (a series has Sci-Fi & Fantasy, no Horror), so a genre lists what it has. Nothing not out yet.
+// series' genres apart (a series has Sci-Fi & Fantasy, no Horror): series of a genre they lack come by TMDB's keyword
+// (horror: Supernatural, Stranger Things; thriller: You, Mindhunter; user 2026-11-01), without anime (keywords bring
+// Death Note to horror, Ranma to romance; Animation has its page). Nothing not out yet.
 // Best rated: TMDB's average with a floor of votes (2,000 a film, 1,500 a series: at 500 2026's hyped shows topped
 // Drama over Breaking Bad), so 12 fans' 9.5 doesn't top a classic. New films: out to stream or buy in the last year
 // (TMDB's digital and physical releases; first out in the last two years: a 4K re-release brought Interstellar),
@@ -411,9 +413,10 @@ async function personPage(request, env, id) {
 // a day in the edge cache.
 const GENRE_PAGES = {
   action: [28, 10759], adventure: [12, 10759], animation: [16, 16], comedy: [35, 35], crime: [80, 80],
-  documentary: [99, 99], drama: [18, 18], family: [10751, 10751], fantasy: [14, 10765], history: [36, 0],
-  horror: [27, 0], kids: [0, 10762], music: [10402, 0], mystery: [9648, 9648], romance: [10749, 0],
-  'science-fiction': [878, 10765], thriller: [53, 0], war: [10752, 10768], western: [37, 37],
+  documentary: [99, 99], drama: [18, 18], family: [10751, 10751], fantasy: [14, 10765],
+  history: [36, 'with_keywords=15126'], horror: [27, 'with_keywords=315058'], kids: [0, 10762],
+  music: [10402, 'with_keywords=283297'], mystery: [9648, 9648], romance: [10749, 'with_keywords=9840'],
+  'science-fiction': [878, 10765], thriller: [53, 'with_keywords=316362'], war: [10752, 10768], western: [37, 37],
 };
 
 // GET /find/<IMDb id> -> {card: Home card | null}: the film or series with that IMDb id (TMDB's find), for
@@ -439,7 +442,7 @@ async function genrePage(request, env, slug) {
   for (const [type, id, votes, date] of [['movie', ids[0], 2000, 'primary_release_date'], ['tv', ids[1], 1500, 'first_air_date']]) {
     if (!id) continue;
     const kind = type === 'movie' ? 'films' : 'series';
-    const base = `&include_adult=false&with_genres=${id}&without_genres=${TALK.join('|')}&${date}.lte=${today}`;
+    const base = `&include_adult=false&${typeof id === 'number' ? `with_genres=${id}` : id}&without_genres=${(typeof id === 'number' ? TALK : [...TALK, 16]).join('|')}&${date}.lte=${today}`;
     const fresh = type === 'movie' ? `&with_release_type=4|5&release_date.gte=${yearAgo}&release_date.lte=${today}`
       + `&${date}.gte=${twoYearsAgo}` : `&${date}.gte=${yearAgo}`;
     const popular = base.replace(`.lte=${today}`, `.lte=${type === 'movie' ? yearAgo : today}`);

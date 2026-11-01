@@ -1386,11 +1386,11 @@ test('voice/find: no Claude answer → the free model reads the text (the shared
   assert.equal((await voice('find', JSON.stringify({ text: 'x' }), e, 'wrong')).status, 403);
 });
 
-test('a genre page: popular, best rated and new films, then series; a genre series lack has films only', async () => {
+test('a genre page: popular, best rated and new films, then series; series by keyword where TMDB has no such genre', async () => {
   const queries = [];
   globalThis.fetch = async (url) => {
     const u = new URL(url);
-    queries.push(u.pathname.replace('/3/', '') + ' ' + u.searchParams.get('sort_by') + ' ' + u.searchParams.get('with_genres'));
+    queries.push(u.pathname.replace('/3/', '') + ' ' + u.searchParams.get('sort_by') + ' ' + (u.searchParams.get('with_genres') || 'k' + u.searchParams.get('with_keywords')));
     const type = u.pathname.endsWith('movie') ? 'movie' : 'tv';
     return new Response(JSON.stringify({ results: [
       { id: 1, title: 'A', name: 'A', release_date: '2024-01-01', first_air_date: '2024-01-01', poster_path: '/a.jpg' },
@@ -1407,8 +1407,12 @@ test('a genre page: popular, best rated and new films, then series; a genre seri
   assert.equal(queries.length, 30); // 5 pages a row: 100 to hide the watched ones from
   queries.length = 0;
   const horror = await (await page('horror')).json();
-  assert.equal(horror.rows.length, 3);
-  assert.ok(queries.every((q) => q.startsWith('discover/movie')));
+  assert.equal(horror.rows.length, 6);
+  assert.ok(queries.includes('discover/movie vote_average.desc 27'));
+  assert.ok(queries.includes('discover/tv vote_average.desc k315058')); // TMDB's "horror" keyword
+  queries.length = 0;
+  assert.equal((await (await page('kids')).json()).rows.length, 3); // no Kids genre for films
+  assert.ok(queries.every((q) => q.startsWith('discover/tv')));
   assert.equal((await page('nope')).status, 404);
 });
 
