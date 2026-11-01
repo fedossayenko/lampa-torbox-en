@@ -742,7 +742,7 @@ test('mine: a series whose last aired episode is watched leaves; Finish later = 
   assert.deepEqual(marks, { tv_93740: 'scheduled' });
 });
 
-test('mine: films being watched (5 min in) join the series (the timeline, by Lampa\'s hash of the original title)', async () => {
+test('mine: films being watched (3 min in) join the series (the timeline, by Lampa\'s hash of the original title)', async () => {
   const e = mineEnv();
   const point = (title, time, percent) => e.DB.raw.prepare(
     'INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, ?, 7000, ?, 1)').run(lampaHashOf(title), time, percent);
@@ -750,14 +750,16 @@ test('mine: films being watched (5 min in) join the series (the timeline, by Lam
   point('Finished', 6900, 95);
   point('Opened', 5, 0);
   point('Tried', 123, 1); // a release's first two minutes: its picture and sound
+  point('Started', 200, 3);
   const film = (id, original) => ({ id, title: 'RU ' + original, original_title: original, poster_path: `/${id}.jpg` });
   cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([
     bm(1, 'history', 'movie', 1, film(603, 'The Matrix')), bm(2, 'history', 'movie', 2, film(8, 'Finished')),
     bm(3, 'history', 'movie', 3, film(9, 'Opened')), bm(4, 'history', 'movie', 4, film(10, 'Tried')),
+    bm(5, 'history', 'movie', 5, film(11, 'Started')),
   ]) });
   const { rows } = await (await getMine(e)).json();
-  assert.deepEqual(rows[0][1].map((c) => c[0]), [603]);
-  assert.equal(rows[0][1][0][2], 'RU The Matrix', 'TMDB down: the card CUB kept');
+  assert.deepEqual(rows[0][1].map((c) => c[0]), [11, 603]); // newest first
+  assert.equal(rows[0][1][1][2], 'RU The Matrix', 'TMDB down: the card CUB kept');
 });
 
 test('mine: Rate what you watched = the history played past 70 % (a series: any episode), no grade yet; the grades', async () => {
@@ -1380,4 +1382,29 @@ test('voice/find: no Claude answer → the free model reads the text (the shared
   assert.equal(input.messages[1].content, 'фильм где мужик на Марсе выращивает картошку');
   assert.equal((await voice('find', JSON.stringify({ text: 'hmm' }), voiceEnv(() => ({ response: 'no idea' })))).status, 502);
   assert.equal((await voice('find', JSON.stringify({ text: 'x' }), e, 'wrong')).status, 403);
+});
+
+test('a genre page: popular, best rated and new films, then series; a genre series lack has films only', async () => {
+  const queries = [];
+  globalThis.fetch = async (url) => {
+    const u = new URL(url);
+    queries.push(u.pathname.replace('/3/', '') + ' ' + u.searchParams.get('sort_by') + ' ' + u.searchParams.get('with_genres'));
+    const type = u.pathname.endsWith('movie') ? 'movie' : 'tv';
+    return new Response(JSON.stringify({ results: [
+      { id: 1, title: 'A', name: 'A', release_date: '2024-01-01', first_air_date: '2024-01-01', poster_path: '/a.jpg' },
+      { id: 2, title: 'No poster', poster_path: null },
+    ].map((m) => ({ ...m, id: m.id + (type === 'tv' ? 100 : 0) })) }));
+  };
+  const page = async (slug) => worker.fetch(new Request('https://w/genre/' + slug), env);
+  const o = await (await page('science-fiction')).json();
+  assert.deepEqual(o.rows.map(([t]) => t),
+    ['New films', 'Popular films', 'Best rated films', 'New series', 'Popular series', 'Best rated series']);
+  assert.deepEqual(o.rows[0][1].map((c) => c[0]), [1]);
+  assert.deepEqual(o.rows[3][1].map((c) => c[0]), [101]);
+  assert.ok(queries.includes('discover/tv vote_average.desc 10765')); // Sci-Fi & Fantasy for series
+  queries.length = 0;
+  const horror = await (await page('horror')).json();
+  assert.equal(horror.rows.length, 3);
+  assert.ok(queries.every((q) => q.startsWith('discover/movie')));
+  assert.equal((await page('nope')).status, 404);
 });
