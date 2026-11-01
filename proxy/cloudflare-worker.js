@@ -406,7 +406,9 @@ async function personPage(request, env, id) {
 // Drama over Breaking Bad), so 12 fans' 9.5 doesn't top a classic. New films: out to stream or buy in the last year
 // (TMDB's digital and physical releases; first out in the last two years: a 4K re-release brought Interstellar),
 // the ones with sources. Popular films: out over a year ago, else they were New's again.
-// Talk, news and reality shows are left out, as on an actor's page. Six TMDB calls, a day in the edge cache.
+// Talk, news and reality shows are left out, as on an actor's page. 100 a row (TMDB's first 5 pages): the app hides
+// what you watched and shows 20, so a row stays full (user 2026-11-01). 30 TMDB calls (of the 50 a request may make),
+// a day in the edge cache.
 const GENRE_PAGES = {
   action: [28, 10759], adventure: [12, 10759], animation: [16, 16], comedy: [35, 35], crime: [80, 80],
   documentary: [99, 99], drama: [18, 18], family: [10751, 10751], fantasy: [14, 10765], history: [36, 0],
@@ -445,10 +447,13 @@ async function genrePage(request, env, slug) {
       [`Popular ${kind}`, type, `${popular}&sort_by=popularity.desc&vote_count.gte=50`],
       [`Best rated ${kind}`, type, `${base}&sort_by=vote_average.desc&vote_count.gte=${votes}`]);
   }
-  const found = await Promise.all(rows.map(([title, type, query]) => tmdb(env, `discover/${type}`, query)
-    .then((res) => (res.ok ? res.json() : {}))
-    .then((o) => [title, (o.results || []).filter((m) => m.poster_path).map((m) => cardOf(m, type))])
-    .catch(() => [title, []])));
+  const page = (type, query, n) => tmdb(env, `discover/${type}`, `${query}&page=${n}`)
+    .then((res) => (res.ok ? res.json() : {})).then((o) => o.results || []).catch(() => []);
+  const found = await Promise.all(rows.map(async ([title, type, query]) => {
+    const all = (await Promise.all([1, 2, 3, 4, 5].map((n) => page(type, query, n)))).flat();
+    const once = new Map(all.filter((m) => m.poster_path).map((m) => [m.id, m])); // pages shift: a title twice
+    return [title, [...once.values()].map((m) => cardOf(m, type))];
+  }));
   const full = found.filter(([, cards]) => cards.length);
   if (!full.length) return corsError(request, 'TMDB unavailable.', 502); // not cached: the next OK asks again
   return new Response(JSON.stringify({ line: '', about: '', rows: full }), {
@@ -1168,8 +1173,9 @@ const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 // {"tv_93740": "S3 E5", ...}}: the rows of Lampa's CUB home that are yours, for the top of lampa-native's Home,
 // every film's mark and grade (the film page's ⋯ and ★ show them; grades: KV GRADES as /grades, "skip" = Didn't
 // watch / not mine), the series with a new episode out (nextNew, freshOut): first in Continue browsing, and "mylist":
-// ["movie_603", ...], what My list holds (the film page's ⋯ adds or removes), and "left": {"movie_603": 4000, ...}, the
-// seconds left of each film started (3 min in, under 90 %, not graded), for its poster.
+// ["movie_603", ...], what My list holds (the film page's ⋯ adds or removes), "left": {"movie_603": 4000, ...}, the
+// seconds left of each film started (3 min in, under 90 %, not graded), for its poster, and "seen": ["movie_603", ...],
+// the films in the history played to 90 % (graded or not): a genre page hides them with the graded and marked ones.
 // A graded film is watched (user 2026-11-01): out of My list, Finish later and Continue browsing; a graded series may be
 // watched on (Foundation: Good after season 1), so only "not mine" (skip) takes it out.
 // Rows: Continue browsing, For you, New in 4K (both made by the hourly cron), My list, Finish later, Rate what you watched.
@@ -1292,7 +1298,10 @@ async function mine(request, env) {
       left[`movie_${h.card.id}`] = p.duration - p.time;
     }
   }
-  return new Response(JSON.stringify({ rows, marks, grades, new: fresh, mylist: listed.map(keyOf), left }), {
+  const seen = all.filter((b) => b.card_type === 'movie').map((b) => [keyOf(b), parsed(b)])
+    .filter(([, h]) => h && done.get(hash(h.card))?.percent >= 90).map(([k]) => k);
+  return new Response(JSON.stringify({ rows, marks, grades, new: fresh, mylist: listed.map(keyOf), left,
+    seen: [...new Set(seen)] }), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(request) },
   });
 }
