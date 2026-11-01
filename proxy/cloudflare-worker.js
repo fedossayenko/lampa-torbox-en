@@ -290,9 +290,9 @@ async function home(request, env) {
 
 // GET /card/movie/<tmdb id> or /card/tv/<tmdb id> -> lampa-native's film page, ready to draw (native.test.js):
 // {name, original, line, overview, scores: [[label, text, 0-100]], seasons: [[label, text, 0-100]], imdb,
-//  episodes: [[season, count]], people, cast: [[name, character, profile_path]], collection, parts: [Home card]}
+//  episodes: [[season, count]], people, cast: [[name, character, profile_path]], collection, parts: [Home card], trailer}
 // cast: the first 12 with a photo. parts: the other films of its collection (TMDB, one more call), oldest first;
-// a film not out yet without a poster is left out.
+// a film not out yet without a poster is left out. trailer: its YouTube video ("" none).
 // The verdict comes first in scores: the same weighted average as ratings-patch.js (keep the two in step).
 const NORM = { tomatoes: 1, metacritic: 1, rogerebert: 25, imdb: 10, letterboxd: 20, kp: 10, trakt: 1, tmdb: 1, metacriticuser: 10 };
 const WEIGHTS = { tomatoes: 4, metacritic: 3, imdb: 3, kp: 2, rogerebert: 1, trakt: 1, tmdb: 1, metacriticuser: 1, letterboxd: 0.5 };
@@ -303,7 +303,7 @@ const SHOW = [['imdb', 'IMDb', (v) => v.toFixed(1)], ['tomatoes', 'RT', (v) => v
 async function filmCard(request, env, type, id) {
   const mdbType = type === 'tv' ? 'show' : 'movie';
   const [res, r] = await Promise.all([
-    tmdb(env, `${type}/${id}`, '&append_to_response=credits,external_ids'),
+    tmdb(env, `${type}/${id}`, '&append_to_response=credits,external_ids,videos'),
     fetch(`https://api.mdblist.com/tmdb/${mdbType}/${id}?apikey=${env.MDBLIST_API_KEY}`)
       .then((x) => (x.ok ? x.json() : {})).then(ratingsOf).catch(() => ({})), // no scores beats no page
   ]);
@@ -333,6 +333,13 @@ async function filmCard(request, env, type, id) {
   const parts = (collection.parts || []).filter((p) => p.poster_path && p.id !== Number(id))
     .sort((a, b) => (a.release_date || '9').localeCompare(b.release_date || '9')).map((p) => cardOf(p, 'movie'));
 
+  // Its trailer (user 2026-11-01: on each film's page, not a row of them; OK plays it in SmartTube): TMDB's YouTube
+  // videos, an official Trailer first, then any Trailer, then a Teaser; the newest of the kind (a series' newest
+  // season's). "" none.
+  const kind = (v) => (v.type === 'Trailer' ? (v.official ? 0 : 1) : v.type === 'Teaser' ? 2 : 9);
+  const trailer = (m.videos?.results || []).filter((v) => v.site === 'YouTube' && v.key && kind(v) < 9)
+    .sort((a, b) => kind(a) - kind(b) || Date.parse(b.published_at) - Date.parse(a.published_at))[0]?.key || '';
+
   const photos = (m.credits?.cast || []).filter((p) => p.profile_path).slice(0, 12)
     .map((p) => [p.name || '', p.character || '', p.profile_path, p.id || 0]); // id: OK opens /person
   return new Response(JSON.stringify({
@@ -353,6 +360,7 @@ async function filmCard(request, env, type, id) {
     cast: photos,
     collection: parts.length ? collection.name || '' : '',
     parts,
+    trailer,
   }), {
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
