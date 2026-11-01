@@ -399,6 +399,50 @@ async function personPage(request, env, id) {
   });
 }
 
+// GET /genre/<slug> -> lampa-native's genre page (Search before typing: OK on a genre), as /person's:
+// {line, about, rows}. Rows: New, Popular and Best rated films, then the same for series; TMDB keeps films' and
+// series' genres apart (a series has Sci-Fi & Fantasy, no Horror), so a genre lists what it has. Nothing not out yet.
+// Best rated: TMDB's average with a floor of votes (2,000 a film, 1,500 a series: at 500 2026's hyped shows topped
+// Drama over Breaking Bad), so 12 fans' 9.5 doesn't top a classic. New films: out to stream or buy in the last year
+// (TMDB's digital and physical releases; first out in the last two years: a 4K re-release brought Interstellar),
+// the ones with sources. Popular films: out over a year ago, else they were New's again.
+// Talk, news and reality shows are left out, as on an actor's page. Six TMDB calls, a day in the edge cache.
+const GENRE_PAGES = {
+  action: [28, 10759], adventure: [12, 10759], animation: [16, 16], comedy: [35, 35], crime: [80, 80],
+  documentary: [99, 99], drama: [18, 18], family: [10751, 10751], fantasy: [14, 10765], history: [36, 0],
+  horror: [27, 0], kids: [0, 10762], music: [10402, 0], mystery: [9648, 9648], romance: [10749, 0],
+  'science-fiction': [878, 10765], thriller: [53, 0], war: [10752, 10768], western: [37, 37],
+};
+
+async function genrePage(request, env, slug) {
+  const ids = GENRE_PAGES[slug];
+  if (!ids) return corsError(request, 'No such genre.', 404);
+  const today = new Date().toISOString().slice(0, 10);
+  const yearAgo = new Date(Date.now() - 365 * 86400e3).toISOString().slice(0, 10);
+  const twoYearsAgo = new Date(Date.now() - 730 * 86400e3).toISOString().slice(0, 10);
+  const rows = [];
+  for (const [type, id, votes, date] of [['movie', ids[0], 2000, 'primary_release_date'], ['tv', ids[1], 1500, 'first_air_date']]) {
+    if (!id) continue;
+    const kind = type === 'movie' ? 'films' : 'series';
+    const base = `&include_adult=false&with_genres=${id}&without_genres=${TALK.join('|')}&${date}.lte=${today}`;
+    const fresh = type === 'movie' ? `&with_release_type=4|5&release_date.gte=${yearAgo}&release_date.lte=${today}`
+      + `&${date}.gte=${twoYearsAgo}` : `&${date}.gte=${yearAgo}`;
+    const popular = base.replace(`.lte=${today}`, `.lte=${type === 'movie' ? yearAgo : today}`);
+    rows.push([`New ${kind}`, type, `${base}&sort_by=popularity.desc${fresh}`],
+      [`Popular ${kind}`, type, `${popular}&sort_by=popularity.desc&vote_count.gte=50`],
+      [`Best rated ${kind}`, type, `${base}&sort_by=vote_average.desc&vote_count.gte=${votes}`]);
+  }
+  const found = await Promise.all(rows.map(([title, type, query]) => tmdb(env, `discover/${type}`, query)
+    .then((res) => (res.ok ? res.json() : {}))
+    .then((o) => [title, (o.results || []).filter((m) => m.poster_path).map((m) => cardOf(m, type))])
+    .catch(() => [title, []])));
+  const full = found.filter(([, cards]) => cards.length);
+  if (!full.length) return corsError(request, 'TMDB unavailable.', 502); // not cached: the next OK asks again
+  return new Response(JSON.stringify({ line: '', about: '', rows: full }), {
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'max-age=86400', ...corsHeaders(request) },
+  });
+}
+
 // GET /segments/movie/<tmdb id>/<imdb id> or /segments/tv/<tmdb id>/<imdb id>?e=1:9,1:10 (6 at most) -> what DDD can
 // skip, in our DDD fork's "segments" format: {"1:9": "intro:0-58867;credits:3395489-"} (ms; no end: to the end of the
 // video; a film's under "0:0"; none: left out). From IntroDB (introdb.app, by IMDb id) and TheIntroDB (theintrodb.org,
@@ -1103,7 +1147,7 @@ const HOURLY_CRON = '23 * * * *';
 // marks for Premium accounts only (error 555 "Нет премиум доступа"), so the app's go to D1 (marks.sql), per account
 // and profile like the grades; a Premium account's own CUB marks count too.
 const MARKS = ['look', 'viewed', 'scheduled', 'continued', 'thrown'];
-const FILM_STARTED_S = 300; // a film in Continue browsing: watched 5 min
+const FILM_STARTED_S = 180; // a film in Continue browsing: watched 3 min (5 until 2026-11-01: sooner, user)
 const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 
 // GET /mine with the app's CUB sign-in (X-Cub-Token, X-Cub-Profile; accounts in CUB_ACCOUNTS only, as /grades) ->
@@ -1112,13 +1156,13 @@ const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 // every film's mark and grade (the film page's ⋯ and ★ show them; grades: KV GRADES as /grades, "skip" = Didn't
 // watch / not mine), the series with a new episode out (nextNew, freshOut): first in Continue browsing, and "mylist":
 // ["movie_603", ...], what My list holds (the film page's ⋯ adds or removes), and "left": {"movie_603": 4000, ...}, the
-// seconds left of each film started (5 min in, under 90 %, not graded), for its poster.
+// seconds left of each film started (3 min in, under 90 %, not graded), for its poster.
 // A graded film is watched (user 2026-11-01): out of My list, Finish later and Continue browsing; a graded series may be
 // watched on (Foundation: Good after season 1), so only "not mine" (skip) takes it out.
 // Rows: Continue browsing, For you, New in 4K (both made by the hourly cron), My list, Finish later, Rate what you watched.
 // Continue browsing: Lampa's (favorite.js continues): the series in the history, newest first, 19 at most; here
-// also the films being watched (5 min in, under 90 %: the timeline; shorter is a try of a release, its sound or a
-// test: user 2026-10-31; their film page still resumes from 10 s), which Lampa's main screen leaves out. Out of it:
+// also the films being watched (3 min in, under 90 %: the timeline; shorter is a try of a release, ~2 min of its
+// sound and picture: user 2026-10-31; their film page still resumes from 10 s), which Lampa's main screen leaves out. Out of it:
 // Viewed, Thrown and Scheduled, and series whose last aired episode is watched. Finish later: the Scheduled ones.
 // Rate what you watched (grades-patch.js's row): the history played past 70 % (a series: any episode), no grade yet.
 // Never cached: it changes with every film played.
@@ -1410,6 +1454,8 @@ export default {
     }
     const actor = new URL(request.url).pathname.match(/^\/person\/(\d+)$/);
     if (actor && request.method === 'GET') return edgeCached(request, ctx, () => personPage(request, env, actor[1]));
+    const genre = new URL(request.url).pathname.match(/^\/genre\/([a-z-]+)$/);
+    if (genre && request.method === 'GET') return edgeCached(request, ctx, () => genrePage(request, env, genre[1]));
     const src = new URL(request.url).pathname.match(/^\/streams\/(movie|series)\/(tt\d+)(?:\/(\d+)\/(\d+))?$/);
     if (src && /^(GET|POST)$/.test(request.method) && (src[1] === 'series') === Boolean(src[3])) {
       return sources(request, env, src[1], src[2], src[3], src[4]);
