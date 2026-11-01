@@ -509,7 +509,7 @@ async function introJobs(request, env) {
 // GET /streams/movie/<imdb id> or /streams/series/<imdb id>/<season>/<episode>[?lang=RU,UA][&from=6] -> lampa-native's
 // sources: {streams: [[hash, fileIdx, title, badges, size, seeders, tracker, languages, cached]], next, total,
 // languages: [[code, releases]]}. Torrentio's list (Cloudflare caches it: 3-8 ms from here), each torrent once,
-// only the asked audio languages (none = all), biggest first. TorBox's cache is checked for the first FIRST only
+// only the asked audio languages (none = all), biggest first, whole discs last. TorBox's cache is checked for the first FIRST only
 // (5 rows fit on the stick's screen, measured; +1 half seen) so they come fast; the app asks from=FIRST for the rest.
 // cached: 1 yes, 0 no, -1 unknown (no TORBOX_API_KEY secret, or TorBox down).
 // POST, the same path: Torrentio's answer in the body, from the stick. Torrentio answers here 429 at times
@@ -530,6 +530,15 @@ const BADGES = [
   [['DD+', /\b(ddp|dd\+|e-?ac-?3)/i], ['DD', /\b(ac-?3|dd[ .]?[257]\.[01])\b/i]],
 ];
 const UNIT = { K: 1e3, M: 1e6, G: 1e9, T: 1e12 };
+// Whole Blu-ray discs (BDMV folders of .m2ts) don't play in DDD (UnrecognizedInputFormat, The Dark Knight's 67.9 GB
+// "UHD Blu-ray disc"): listed last, badged "Disc". Torrentio gives no file list, so the name tells: said outright, or a
+// scene name of an untouched disc ("2160p.BluRay.HEVC.DTS-HD.MA.5.1-TASTED": a disc's codec, not a remux, not encoded),
+// which needs 15 GB+ (a "BluRay.HEVC.10bit" encode is a few GB). A single video file (Torrentio's file name) is never one.
+// ponytail: names only; TorBox's file list (checkcached list_files) would be exact for cached torrents, if names miss.
+const DISC = /blu-?ray[ ._-]?disc|full[ ._-]?blu-?ray|complete[ ._-]+(uhd[ ._-]+)?blu-?ray|\bbdmv\b|\bbd(25|50|66|100)\b|\.iso\b/i;
+const isDisc = (text, bytes, filename) => !/\.(mkv|mp4|avi|webm|mov)$/i.test(filename || '') && (DISC.test(text)
+  || (bytes >= 15e9 && /\bblu-?ray\b/i.test(text) && /\b(avc|hevc|vc-?1|mpeg-?2)\b/i.test(text)
+    && !/remux|x26[45]|\bweb|rip\b/i.test(text)));
 
 // Torrentio marks audio languages with country flags (🇬🇧 for English); no flags = an English release.
 function languagesOf(line) {
@@ -589,9 +598,13 @@ async function sources(request, env, kind, imdb, season, episode) {
     const size = (stats.match(/💾\s*([\d.]+\s*[KMGT]B)/) || [])[1] || '';
     const filename = st.behaviorHints?.filename;
     const text = `${st.name || ''} ${lines[0]} ${filename || ''}`;
-    const badges = BADGES.map((group) => group.find(([, re]) => re.test(text))?.[0]).filter(Boolean);
+    const bytes = parseFloat(size) * (UNIT[(size.match(/([KMGT])B/) || [])[1]] || 0) || 0;
+    const disc = isDisc(text, bytes, filename);
+    const badges = [...disc ? ['Disc'] : [], ...BADGES.map((group) => group.find(([, re]) => re.test(text))?.[0])]
+      .filter(Boolean);
     all.push({
-      bytes: parseFloat(size) * (UNIT[(size.match(/([KMGT])B/) || [])[1]] || 0) || 0,
+      bytes,
+      disc,
       row: [hash, st.fileIdx ?? -1, filename || lines[0], badges, size, Number((stats.match(/👤\s*(\d+)/) || [])[1]) || 0,
         ((stats.match(/⚙️\s*(.+)/) || [])[1] || '').trim(), languagesOf((at >= 0 && lines[at + 1]) || '')],
     });
@@ -601,7 +614,7 @@ async function sources(request, env, kind, imdb, season, episode) {
   const params = new URL(request.url).searchParams;
   const wanted = new Set((params.get('lang') || '').split(',').filter(Boolean));
   const shown = all.filter(({ row }) => !wanted.size || row[7].some((code) => wanted.has(code)))
-    .sort((a, b) => b.bytes - a.bytes).slice(0, MAX); // stable: equal sizes keep Torrentio's order
+    .sort((a, b) => a.disc - b.disc || b.bytes - a.bytes).slice(0, MAX); // stable: equal sizes keep Torrentio's order
   const from = Number(params.get('from')) || 0;
   const batch = shown.slice(from, from ? MAX : FIRST).map(({ row }) => row);
   const cached = await cachedOnTorBox(env, batch.map(([hash]) => hash));
