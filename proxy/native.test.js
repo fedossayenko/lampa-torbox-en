@@ -99,6 +99,7 @@ test('film page: display-ready strings, the verdict first, then TMDB and the MDB
     cast: [], // the photos row: only people with a photo (these have none)
     collection: '',
     parts: [],
+    trailer: '',
   });
 });
 
@@ -123,6 +124,21 @@ test('film page: the cast row (12 with photos) and the other films of its collec
   assert.equal(film.collection, 'Dune Collection');
   // not this film (7): its page doesn't offer itself
   assert.deepEqual(film.parts, [[6, 'movie', 'Dune', '2021', '/1.jpg', 78, '/b1.jpg']]);
+});
+
+test('film page: its trailer, the newest official YouTube Trailer, else any Trailer, else a Teaser; none: ""', async () => {
+  const v = (key, type, official, date, site = 'YouTube') => ({ key, site, type, official, published_at: date });
+  const trailerOf = async (videos) => {
+    tmdbAnswers({ 'movie/7': { title: 'Dune', videos: { results: videos } } });
+    return (await (await card('movie/7')).json()).trailer;
+  };
+  assert.equal(await trailerOf([v('t1', 'Trailer', true, '2023-05-03'), v('t2', 'Trailer', true, '2023-12-21'),
+    v('fan', 'Trailer', false, '2024-01-01'), v('tease', 'Teaser', true, '2024-02-01'), v('vimeo', 'Trailer', true, '2024-03-01', 'Vimeo'),
+    v('clip', 'Clip', true, '2024-03-01')]), 't2');
+  assert.equal(await trailerOf([v('fan', 'Trailer', false, '2024-01-01'), v('tease', 'Teaser', true, '2024-02-01')]), 'fan');
+  assert.equal(await trailerOf([v('tease', 'Teaser', true, '2024-02-01'), v('clip', 'Featurette', true, '2024-03-01')]), 'tease');
+  assert.equal(await trailerOf([]), '');
+  assert.ok(asked[0].includes('append_to_response=credits,external_ids,videos'), 'the same TMDB call');
 });
 
 test('a collection with nothing but this film: no collection row', async () => {
@@ -170,7 +186,7 @@ test('film page without MDBList still opens; fields TMDB leaves out are empty st
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(),
     { name: 'Film', original: '', line: '', overview: '', scores: [], seasons: [], imdb: '', episodes: [], people: '',
-      cast: [], collection: '', parts: [] });
+      cast: [], collection: '', parts: [], trailer: '' });
 });
 
 test('film page answers TMDB\'s 404 as 404 and other TMDB failures as 502', async () => {
