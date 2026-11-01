@@ -103,7 +103,7 @@ test('film page: display-ready strings, the verdict first, then TMDB and the MDB
 });
 
 test('film page: the cast row (12 with photos) and the other films of its collection as Home cards, oldest first', async () => {
-  const people = Array.from({ length: 15 }, (_, i) => ({ name: `Actor ${i}`, character: `Role ${i}`, profile_path: i === 1 ? null : `/a${i}.jpg` }));
+  const people = Array.from({ length: 15 }, (_, i) => ({ id: 100 + i, name: `Actor ${i}`, character: `Role ${i}`, profile_path: i === 1 ? null : `/a${i}.jpg` }));
   tmdbAnswers({
     'movie/7': { title: 'Dune: Part Two', credits: { cast: people, crew: [] }, belongs_to_collection: { id: 726871, name: 'Dune Collection' } },
     'collection/726871': {
@@ -117,7 +117,8 @@ test('film page: the cast row (12 with photos) and the other films of its collec
   });
   const film = await (await card('movie/7')).json();
   assert.equal(film.cast.length, 12);
-  assert.deepEqual(film.cast.slice(0, 2), [['Actor 0', 'Role 0', '/a0.jpg'], ['Actor 2', 'Role 2', '/a2.jpg']]);
+  // TMDB's person id last: OK on a photo opens their page (/person)
+  assert.deepEqual(film.cast.slice(0, 2), [['Actor 0', 'Role 0', '/a0.jpg', 100], ['Actor 2', 'Role 2', '/a2.jpg', 102]]);
   assert.equal(film.people, '', 'the photos row names the cast: the text line does not repeat it');
   assert.equal(film.collection, 'Dune Collection');
   // not this film (7): its page doesn't offer itself
@@ -177,6 +178,67 @@ test('film page answers TMDB\'s 404 as 404 and other TMDB failures as 502', asyn
   assert.equal((await card('movie/1')).status, 404);
   tmdbAnswers({});
   assert.equal((await card('tv/1')).status, 502);
+});
+
+const person = async (id) => worker.fetch(new Request('https://w/person/' + id), env);
+const credit = (id, type, name, date, votes, average, more = {}) => ({
+  id, media_type: type, [type === 'tv' ? 'name' : 'title']: name, [type === 'tv' ? 'first_air_date' : 'release_date']: date,
+  poster_path: `/p${id}.jpg`, vote_count: votes, vote_average: average, character: 'Someone', genre_ids: [18], ...more,
+});
+
+test('actor page: best rated (weighted by votes), then films and series newest first; not themselves, no talk shows', async () => {
+  tmdbAnswers({
+    'person/517': {
+      name: 'Pierce Brosnan', birthday: '1953-05-16', deathday: null, place_of_birth: 'Drogheda, Ireland',
+      biography: 'An Irish actor.', profile_path: '/pb.jpg',
+      combined_credits: {
+        cast: [
+          credit(1, 'movie', 'GoldenEye', '1995-11-16', 4000, 7.0),
+          credit(2, 'movie', 'Obscure Gem', '2010-01-01', 12, 9.5), // 9.5 from 12 votes: not above GoldenEye
+          credit(3, 'movie', 'The Thomas Crown Affair', '1999-08-06', 1500, 6.8),
+          credit(4, 'movie', 'Upcoming', '', 0, 0), // not out yet (no date, or later than today): nothing to watch
+          credit(8, 'movie', 'Sequel', '2999-01-01', 0, 0),
+          credit(1, 'movie', 'GoldenEye', '1995-11-16', 4000, 7.0, { character: 'Another role' }), // once
+          credit(5, 'movie', 'No poster', '2001-01-01', 50, 6.0, { poster_path: null }),
+          credit(6, 'movie', 'A documentary', '2015-01-01', 100, 7.5, { character: 'Himself' }),
+          credit(7, 'movie', 'Bond at 60', '2022-01-01', 30, 7.0, { character: 'James Bond (archive footage)' }),
+          credit(20, 'tv', 'MobLand', '2025-03-30', 900, 8.1),
+          credit(21, 'tv', 'Remington Steele', '1982-10-01', 300, 7.3),
+          credit(22, 'tv', 'The Late Show', '2015-09-08', 800, 6.5, { genre_ids: [10767] }), // a talk show
+          credit(23, 'tv', 'The Simpsons', '1989-12-17', 10000, 8.0, { episode_count: 1 }), // a guest voice: not his
+          credit(24, 'tv', 'Bag of Bones', '2011-12-11', 0, 0, { episode_count: 2 }), // a two-part mini-series: his
+        ],
+      },
+    },
+  });
+  const res = await person(517);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('Cache-Control'), 'max-age=86400');
+  const p = await res.json();
+  assert.equal(new URL(asked[0]).searchParams.get('append_to_response'), 'combined_credits'); // one TMDB call
+  assert.match(p.line, /^Born 1953 \(\d+\) · Drogheda, Ireland$/);
+  assert.equal(p.about, 'An Irish actor.');
+  const ids = Object.fromEntries(p.rows.map(([title, cards]) => [title, cards.map((c) => c[0])]));
+  assert.deepEqual(ids, {
+    'Best rated': [20, 1, 21, 3, 2],
+    Films: [2, 3, 1],
+    Series: [20, 24, 21],
+  });
+  assert.deepEqual(p.rows[2][1][0], [20, 'tv', 'MobLand', '2025', '/p20.jpg', 81, '']); // Home cards
+});
+
+test('actor page: died; no series, no row; TMDB\'s 404 → 404', async () => {
+  tmdbAnswers({
+    'person/1': {
+      name: 'Gone', birthday: '1930-08-25', deathday: '2020-10-31', place_of_birth: '', biography: '', profile_path: null,
+      combined_credits: { cast: [credit(1, 'movie', 'Film', '1962-10-05', 3000, 7.0)] },
+    },
+  });
+  const p = await (await person(1)).json();
+  assert.equal(p.line, '1930–2020');
+  assert.deepEqual(p.rows.map(([title]) => title), ['Best rated', 'Films']);
+  globalThis.fetch = async () => new Response('{}', { status: 404 });
+  assert.equal((await person(2)).status, 404);
 });
 
 // Sources: Torrentio's list filtered by audio language, biggest first; TorBox's cache checked for the first 6 only
