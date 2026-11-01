@@ -258,8 +258,28 @@ async function search(request, env) {
   });
 }
 
+// New trailers (user 2026-11-01: not a list of every trailer, the top ones): TMDB's trending films of the week (a film
+// trends when its trailer is out; its popularity alone brought small ones still to come), each with its newest
+// official YouTube trailer from the last 60 days; OK plays it in SmartTube. ponytail: TMDB's trend, not YouTube's
+// views (those need a YouTube API key). 32 TMDB calls: /home makes 40 of the 50 a request may.
+async function trailerRow(env) {
+  const pages = await Promise.all([1, 2].map((n) => tmdb(env, 'trending/movie/week', `&page=${n}`)
+    .then((r) => (r.ok ? r.json() : {})).then((o) => o.results || []).catch(() => [])));
+  const films = [...new Map(pages.flat().filter((m) => m.poster_path).map((m) => [m.id, m])).values()].slice(0, 30);
+  const since = Date.now() - 60 * 86400e3;
+  const newest = await Promise.all(films.map((m) => tmdb(env, `movie/${m.id}/videos`)
+    .then((r) => (r.ok ? r.json() : {}))
+    .then((o) => (o.results || []).filter((v) => v.site === 'YouTube' && v.type === 'Trailer' && v.official
+      && Date.parse(v.published_at) > since).sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at))[0])
+    .catch(() => null)));
+  const picked = films.map((m, i) => [m, newest[i]]).filter(([, v]) => v);
+  return picked.length ? { row: ['New trailers', picked.map(([m]) => cardOf(m, 'movie'))],
+    keys: Object.fromEntries(picked.map(([m, v]) => [`movie_${m.id}`, v.key])) } : null;
+}
+
 async function home(request, env) {
   let rawBytes = 0;
+  const trailers = trailerRow(env).catch(() => null); // with the rows, not after them
   const rows = await Promise.all(HOME_ROWS.map(async ([title, path]) => {
     try {
       const res = await tmdb(env, path);
@@ -278,7 +298,9 @@ async function home(request, env) {
   }));
   const ok = rows.filter(Boolean);
   if (!ok.length) return corsError(request, 'TMDB unavailable.', 502);
-  return new Response(JSON.stringify({ rows: ok }), {
+  const t = await trailers;
+  if (t) ok.splice(1, 0, t.row); // under Watching now
+  return new Response(JSON.stringify({ rows: ok, trailers: t ? t.keys : {} }), {
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'max-age=3600',
