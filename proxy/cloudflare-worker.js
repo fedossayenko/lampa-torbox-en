@@ -290,9 +290,11 @@ async function home(request, env) {
 
 // GET /card/movie/<tmdb id> or /card/tv/<tmdb id> -> lampa-native's film page, ready to draw (native.test.js):
 // {name, original, line, overview, scores: [[label, text, 0-100]], seasons: [[label, text, 0-100]], imdb,
-//  episodes: [[season, count]], people, cast: [[name, character, profile_path]], collection, parts: [Home card], trailer}
+//  episodes: [[season, count]], people, cast: [[name, character, profile_path]], collection, parts: [Home card], trailer,
+//  runtime}
 // cast: the first 12 with a photo. parts: the other films of its collection (TMDB, one more call), oldest first;
-// a film not out yet without a poster is left out. trailer: its YouTube video ("" none).
+// a film not out yet without a poster is left out. trailer: its YouTube video ("" none). runtime: a film's minutes
+// (0 unknown, a series): the page's "ends at 23:41".
 // The verdict comes first in scores: the same weighted average as ratings-patch.js (keep the two in step).
 const NORM = { tomatoes: 1, metacritic: 1, rogerebert: 25, imdb: 10, letterboxd: 20, kp: 10, trakt: 1, tmdb: 1, metacriticuser: 10 };
 const WEIGHTS = { tomatoes: 4, metacritic: 3, imdb: 3, kp: 2, rogerebert: 1, trakt: 1, tmdb: 1, metacriticuser: 1, letterboxd: 0.5 };
@@ -361,6 +363,7 @@ async function filmCard(request, env, type, id) {
     collection: parts.length ? collection.name || '' : '',
     parts,
     trailer,
+    runtime: type === 'movie' && m.runtime > 0 ? m.runtime : 0,
   }), {
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
@@ -426,6 +429,54 @@ const GENRE_PAGES = {
   music: [10402, 'with_keywords=283297'], mystery: [9648, 9648], romance: [10749, 'with_keywords=9840'],
   'science-fiction': [878, 10765], thriller: [53, 'with_keywords=316362'], war: [10752, 10768], western: [37, 37],
 };
+
+// GET /discover/<genre slug>?type=movie|tv&years=<decade: 2010, or "older": before 1980>&country=<ISO code>&score=<60-90>
+// &sort=best|popular|new&page=<n> -> {cards: [Home card], pages}: a genre with filters (user's design 2026-11-02), TMDB's
+// discover, 20 a page. Best rated: a floor of 300 votes (a decade or a country holds fewer well-known titles than the
+// genre page's 2,000), popular: 50, new: the newest out first (10). Nothing not out yet, no talk shows; series of a genre
+// TMDB lacks by keyword, as the genre page. A day in the edge cache.
+const SORTS = { best: ['vote_average.desc', 300], popular: ['popularity.desc', 50], new: ['DATE.desc', 10] };
+async function discover(request, env, slug) {
+  const q = new URL(request.url).searchParams;
+  const type = q.get('type') === 'tv' ? 'tv' : 'movie';
+  const id = GENRE_PAGES[slug]?.[type === 'movie' ? 0 : 1];
+  if (!id) return corsError(request, 'No such genre.', 404);
+  const date = type === 'movie' ? 'primary_release_date' : 'first_air_date';
+  const today = new Date().toISOString().slice(0, 10);
+  const years = q.get('years') || '';
+  const decade = /^(19[89]0|20[0-2]0)$/.test(years) ? Number(years) : 0;
+  const lte = years === 'older' ? '1979-12-31' : decade ? [`${decade + 9}-12-31`, today].sort()[0] : today;
+  const [sort, votes] = SORTS[q.get('sort')] || SORTS.best;
+  let query = `&include_adult=false&${typeof id === 'number' ? `with_genres=${id}` : id}&without_genres=`
+    + `${(typeof id === 'number' ? TALK : [...TALK, 16]).join('|')}&${date}.lte=${lte}&sort_by=${sort.replace('DATE', date)}`
+    + `&vote_count.gte=${votes}&page=${Math.min(500, Math.max(1, Number(q.get('page')) || 1))}`;
+  if (decade) query += `&${date}.gte=${decade}-01-01`;
+  if (/^[A-Z]{2}$/.test(q.get('country') || '')) query += `&with_origin_country=${q.get('country')}`;
+  if (/^[5-9]0$/.test(q.get('score') || '')) query += `&vote_average.gte=${Number(q.get('score')) / 10}`;
+  const res = await tmdb(env, `discover/${type}`, query);
+  if (!res.ok) return corsError(request, `TMDB ${res.status}`, 502); // not cached: the next ask tries again
+  const o = await res.json();
+  return new Response(JSON.stringify({ cards: (o.results || []).filter((m) => m.poster_path).map((m) => cardOf(m, type)),
+    pages: Math.min(500, o.total_pages || 0) }), {
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'max-age=86400', ...corsHeaders(request) },
+  });
+}
+
+// GET /torbox (the stick's X-Play-Token) -> {plan: "Pro", torrents: 37}: the TorBox account the worker plays from,
+// for the app's Settings. TorBox down → 502.
+const PLANS = ['Free', 'Essential', 'Pro', 'Standard'];
+async function torboxAccount(request, env) {
+  if (!sameSecret(request.headers.get('X-Play-Token'), env.PLAY_TOKEN)) return corsError(request, 'Forbidden.', 403);
+  try {
+    const [me, list] = await Promise.all([torboxApi(env, '../user/me'), torboxApi(env, 'mylist?bypass_cache=true')]);
+    if (!me.data) throw new Error('no account');
+    return new Response(JSON.stringify({ plan: PLANS[me.data.plan] || String(me.data.plan), torrents: (list.data || []).length }), {
+      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(request) },
+    });
+  } catch {
+    return corsError(request, 'TorBox unavailable.', 502);
+  }
+}
 
 // GET /find/<IMDb id> -> {card: Home card | null}: the film or series with that IMDb id (TMDB's find), for
 // importing IMDb's ratings export (proxy/imdb-import.py) into the grades. A day in the edge cache.
@@ -1066,10 +1117,12 @@ function place(s, done) {
 // so with two or more aired since (a week missed) there is no label until you catch up; upgrade: TMDB's
 // tv/<id>/season/<n> for the episode's own date.
 const NEW_DAYS = 30;
+// The episode after [season, episode]: the next season's first after a season's last.
+const after = (seasons, [n, e]) => (e < (seasons.find(([x]) => x === n)?.[1] || 0) ? [n, e + 1] : [n + 1, 1]);
 function nextNew(s, at, now) {
   const { seasons, ls, le, w } = at;
   if (!w) return null;
-  const next = w[1] < (seasons.find(([n]) => n === w[0])?.[1] || 0) ? [w[0], w[1] + 1] : [w[0] + 1, 1];
+  const next = after(seasons, w);
   if (next[0] > ls || (next[0] === ls && next[1] > le)) return null; // not aired yet
   const aired = Date.parse(next[1] === 1 ? seasons.find(([n]) => n === next[0])?.[2]
     : next[0] === ls && next[1] === le ? s.aired : null);
@@ -1200,7 +1253,9 @@ const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 // seconds left of each film started (3 min in, under 90 %, not graded), for its poster, and "tv_1399": "26 ep", a
 // series' aired episodes after your furthest watched one (none when caught up), "percent": {"movie_603": 43, ...},
 // how far in each of those films is (a Continue tile's bar), and "seen": ["movie_603", ...],
-// the films in the history played to 90 % (graded or not): a genre page hides them with the graded and marked ones.
+// the films in the history played to 90 % (graded or not): a genre page hides them with the graded and marked ones,
+// "next": {"tv_1399": "S3 E5 · up next", ...}, a series' episode to go on with (Continue browsing's tiles), and
+// "coming": [[date, card, what, state], ...], the app's Coming up.
 // A graded film is watched (user 2026-11-01): out of My list, Finish later and Continue browsing; a graded series may be
 // watched on (Foundation: Good after season 1), so only "not mine" (skip) takes it out.
 // Rows: Continue browsing, For you, New in 4K (both made by the hourly cron), My list, Finish later, Rate what you watched.
@@ -1312,6 +1367,52 @@ async function mine(request, env) {
   const unseen = (type, id) => !played.has(`${type}_${id}`) && !(`${type}_${id}` in grades) && !marks[`${type}_${id}`];
   const forYou = JSON.parse(picks[0]?.cards || '[]').filter((c) => unseen(c[1], c[0])).slice(0, 20);
   const in4k = uhd.filter((r) => unseen(r.type, r.id)).slice(0, 20).map((r) => JSON.parse(r.card));
+  // A series tile's line in Continue browsing (user's design 2026-11-02): its episode to go on with, the one after
+  // the furthest watched, aired: "S3 E5 · up next", or "S1 E7 · 12m left" while it is being watched.
+  const nextOf = new Map();
+  for (const h of continuing.filter((x) => x.type === 'tv')) {
+    const s = info.get(Number(h.card.id));
+    const at = places.get(Number(h.card.id));
+    if (!at?.w) continue;
+    const n = after(at.seasons, at.w);
+    if (n[0] < at.ls || (n[0] === at.ls && n[1] <= at.le)) nextOf.set(s.id, [n, episodeKey(n, s.original)]);
+  }
+  const partly = new Map(nextOf.size ? (await db('SELECT hash, time, duration FROM timeline WHERE percent < 90 AND hash '
+    + 'IN (SELECT value FROM json_each(?))', JSON.stringify([...nextOf.values()].map(([, k]) => k)))).map((p) => [p.hash, p]) : []);
+  const leftText = (sec) => {
+    const m = Math.max(1, Math.round(sec / 60));
+    return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m left` : `${m}m left`;
+  };
+  const next = {};
+  for (const [id, [n, k]] of nextOf) {
+    const p = partly.get(k);
+    next[`tv_${id}`] = `S${n[0]} E${n[1]} · ${p && p.time >= 60 && p.duration > p.time ? leftText(p.duration - p.time) : 'up next'}`;
+  }
+  // Coming up (user's design 2026-11-02), [date, card, what, state] by date, "" (later, or no date) last: the next
+  // episode of each series you follow for four weeks: a new one aired (out with RU/UA audio, state "out", or only in
+  // English so far, "waiting": dated today), or the next to air once you're caught up ("airs"); and My list's films
+  // not out yet ("film": in four weeks, else "").
+  const today = new Date().toISOString().slice(0, 10);
+  const until = new Date(Date.now() + 28 * 86400e3).toISOString().slice(0, 10);
+  // "S6 E3 · next after your E2", "Season 4 starts · you finished season 3"
+  const what = ([n, e], w, how) => (e === 1 ? `Season ${n} starts${how} · you finished season ${w[0]}`
+    : `S${n} E${e}${how} · next after your E${w[1]}`);
+  const coming = newOnes.map((x) => [today, JSON.parse(info.get(Number(x.h.card.id)).card), what(x.next,
+    places.get(Number(x.h.card.id)).w, out.has(x.key) ? ' · out with RU/UA audio' : ' · out in English'),
+  out.has(x.key) ? 'out' : 'waiting']);
+  for (const h of followed) {
+    const s = info.get(Number(h.card.id));
+    const at = s && places.get(s.id);
+    if (!at?.w || at.w[0] !== at.ls || at.w[1] !== at.le || !s.next_air || s.next_air < today || s.next_air > until) continue;
+    coming.push([s.next_air, JSON.parse(s.card), what(after(at.seasons, at.w), at.w, ''), 'airs']); // caught up
+  }
+  for (const h of mylist) {
+    const date = h.type === 'movie' ? h.card.release_date || '' : today;
+    const card = date > today && !finished(h) && cardFor(h);
+    if (card) coming.push([date <= until ? date : '', card, "From My list · in cinemas first, here once it's out digitally", 'film']);
+  }
+  const rank = ['out', 'waiting', 'airs', 'film']; // a day's: out first
+  coming.sort((a, b) => (a[0] || '9').localeCompare(b[0] || '9') || rank.indexOf(a[3]) - rank.indexOf(b[3]));
   const rows = [];
   for (const [title, cards] of [['Continue browsing', continuing.map(cardFor)], ['For you', forYou], ['New in 4K', in4k],
     ...lists.slice(1).map(([title, l]) => [title, l.map(cardFor)])]) {
@@ -1331,7 +1432,7 @@ async function mine(request, env) {
   const seen = all.filter((b) => b.card_type === 'movie').map((b) => [keyOf(b), parsed(b)])
     .filter(([, h]) => h && done.get(hash(h.card))?.percent >= 90).map(([k]) => k);
   return new Response(JSON.stringify({ rows, marks, grades, new: fresh, mylist: listed.map(keyOf), left, percent,
-    seen: [...new Set(seen)] }), {
+    seen: [...new Set(seen)], next, coming }), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(request) },
   });
 }
@@ -1510,6 +1611,9 @@ export default {
     if (imdb && request.method === 'GET') return edgeCached(request, ctx, () => findImdb(request, env, imdb[1]));
     const genre = new URL(request.url).pathname.match(/^\/genre\/([a-z-]+)$/);
     if (genre && request.method === 'GET') return edgeCached(request, ctx, () => genrePage(request, env, genre[1]));
+    const picked = new URL(request.url).pathname.match(/^\/discover\/([a-z-]+)$/);
+    if (picked && request.method === 'GET') return edgeCached(request, ctx, () => discover(request, env, picked[1]));
+    if (new URL(request.url).pathname === '/torbox' && request.method === 'GET') return torboxAccount(request, env);
     const src = new URL(request.url).pathname.match(/^\/streams\/(movie|series)\/(tt\d+)(?:\/(\d+)\/(\d+))?$/);
     if (src && /^(GET|POST)$/.test(request.method) && (src[1] === 'series') === Boolean(src[3])) {
       return sources(request, env, src[1], src[2], src[3], src[4]);

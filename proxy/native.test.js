@@ -100,6 +100,7 @@ test('film page: display-ready strings, the verdict first, then TMDB and the MDB
     collection: '',
     parts: [],
     trailer: '',
+    runtime: 166, // minutes: the app's "ends at 23:41"
   });
 });
 
@@ -177,6 +178,7 @@ test('series: original name, seasons with their TMDB scores (no specials, no unr
   assert.equal(film.people, 'Created by Hwang Dong-hyuk');
   assert.equal(film.imdb, 'tt10919420'); // TV details carry it only in external_ids
   assert.deepEqual(film.episodes, [[1, 9], [2, 7]]); // [season, episodes], no specials
+  assert.equal(film.runtime, 0); // a film's only
   assert.match(asked.find((u) => u.includes('/3/tv/9')), /append_to_response=credits,external_ids/);
 });
 
@@ -186,7 +188,7 @@ test('film page without MDBList still opens; fields TMDB leaves out are empty st
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(),
     { name: 'Film', original: '', line: '', overview: '', scores: [], seasons: [], imdb: '', episodes: [], people: '',
-      cast: [], collection: '', parts: [], trailer: '' });
+      cast: [], collection: '', parts: [], trailer: '', runtime: 0 });
 });
 
 test('film page answers TMDB\'s 404 as 404 and other TMDB failures as 502', async () => {
@@ -843,7 +845,8 @@ test('mine: a new episode out with RU/UA audio goes first in Continue browsing, 
       [3, 5], day(7)),
     'tv/196322': show(196322, 'Dark Matter', 'tt12688584', [[1, 9, '2024-05-08'], [2, 10, day(2)]], [2, 1], day(2)),
     'tv/60574': show(60574, 'Peaky Blinders', 'tt2442560', [[1, 6, '2013-09-12'], [2, 6, '2014-10-02']], [2, 6], '2014-11-06'),
-    'tv/95396': show(95396, 'Severance', 'tt11280740', [[1, 9, day(40)]], [1, 1], day(40)),
+    'tv/95396': { ...show(95396, 'Severance', 'tt11280740', [[1, 9, day(40)]], [1, 1], day(40)),
+      next_episode_to_air: { air_date: day(-5) } },
     'tv/85552': show(85552, 'Euphoria', 'tt8772296', [[3, 8, day(200)]], [3, 8], day(150)),
     'tv/270476': show(270476, "Widow's Bay", 'tt1', [[1, 10, day(60)]], [1, 10], day(5)),
     '/stream/series/tt0804484:3:5.json': ru,
@@ -856,6 +859,12 @@ test('mine: a new episode out with RU/UA audio goes first in Continue browsing, 
   assert.deepEqual(first.new, { tv_93740: 'S3 E5' }, 'Dark Matter S2 E1: English only so far');
   assert.deepEqual(first.left, { tv_93740: '1 ep', tv_196322: '1 ep', tv_60574: '9 ep', tv_85552: '1 ep',
     tv_270476: '9 ep' }, 'aired after the furthest watched (Peaky Blinders: S1 E4-6 and season 2); Severance: none');
+  assert.deepEqual(first.next, { tv_93740: 'S3 E5 · up next', tv_270476: 'S1 E2 · up next', tv_85552: 'S3 E8 · up next',
+    tv_60574: 'S1 E4 · up next', tv_196322: 'S2 E1 · up next' }, 'Continue browsing\'s tiles: the episode after the furthest watched');
+  assert.deepEqual(first.coming.map(([date, c, what, state]) => [date, c[2], what, state]), [
+    [day(0), 'Foundation', 'S3 E5 · out with RU/UA audio · next after your E4', 'out'],
+    [day(0), 'Dark Matter', 'Season 2 starts · out in English · you finished season 1', 'waiting'],
+    [day(-5), 'Severance', 'S1 E2 · next after your E1', 'airs']], 'caught up on Severance: its next air date');
   assert.deepEqual(asked.filter((u) => u.includes('torrentio')).sort(),
     ['torrentio.strem.fun/stream/series/tt0804484:3:5.json', 'torrentio.strem.fun/stream/series/tt12688584:2:1.json']);
   cub(answers);
@@ -1061,7 +1070,7 @@ test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502;
   assert.equal((await getMine(e)).status, 502);
   cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]) });
   assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {}, new: {}, mylist: [], left: {}, percent: {},
-    seen: [] });
+    seen: [], next: {}, coming: [] });
 });
 
 test('mine/history: a film played on the stick goes to the front of Lampa\'s history as Lampa\'s card; again: moved', async () => {
@@ -1445,4 +1454,41 @@ test('find: a title by its IMDb id (films first), null when TMDB has none', asyn
   assert.deepEqual((await find('tt0903747')).card.slice(0, 2), [1396, 'tv']);
   assert.equal((await find('tt0000001')).card, null);
   assert.ok(asked[0].includes('external_source=imdb_id'));
+});
+
+test('discover: a genre with filters, one TMDB page; decade, country, score and sort reach TMDB; nonsense ones don\'t', async () => {
+  const queries = [];
+  globalThis.fetch = async (url) => {
+    queries.push(new URL(url));
+    return new Response(JSON.stringify({ total_pages: 900, results: [
+      { id: 1, title: 'Prisoners', release_date: '2013-09-20', poster_path: '/p.jpg', vote_average: 8.1 },
+      { id: 2, title: 'No poster', poster_path: null }] }));
+  };
+  const ask = async (q) => worker.fetch(new Request('https://w/discover/thriller' + q), env);
+  const o = await (await ask('?years=2010&country=US&score=70&sort=best&page=2')).json();
+  assert.deepEqual(o.cards.map((c) => c[2]), ['Prisoners']);
+  assert.equal(o.pages, 500, 'TMDB gives 500 pages at most');
+  const p = queries[0].searchParams;
+  assert.equal(queries[0].pathname, '/3/discover/movie');
+  assert.deepEqual([p.get('with_genres'), p.get('primary_release_date.gte'), p.get('primary_release_date.lte'),
+    p.get('with_origin_country'), p.get('vote_average.gte'), p.get('sort_by'), p.get('vote_count.gte'), p.get('page')],
+  ['53', '2010-01-01', '2019-12-31', 'US', '7', 'vote_average.desc', '300', '2']);
+  await ask('?type=tv&years=older&country=us&score=7&sort=new');
+  const t = queries[1].searchParams;
+  assert.equal(queries[1].pathname, '/3/discover/tv');
+  assert.deepEqual([t.get('with_keywords'), t.get('first_air_date.lte'), t.get('with_origin_country'), t.get('vote_average.gte'),
+    t.get('sort_by')], ['316362', '1979-12-31', null, null, 'first_air_date.desc']);
+  assert.equal((await ask('x'.replace('x', '') + '?type=movie').then((r) => r.status)), 200);
+  assert.equal((await worker.fetch(new Request('https://w/discover/kids'), env)).status, 404, 'no Kids genre for films');
+});
+
+test('torbox: the account\'s plan and torrents, for the stick only; TorBox down → 502', async () => {
+  const e = { ...env, TORBOX_API_KEY: 'k', PLAY_TOKEN: 'stick-token' };
+  globalThis.fetch = async (url) => new Response(JSON.stringify(String(url).includes('/user/me') ? { data: { plan: 2 } }
+    : { data: [{ id: 1 }, { id: 2 }] }));
+  const get = (h) => worker.fetch(new Request('https://w/torbox', { headers: h }), e);
+  assert.deepEqual(await (await get({ 'X-Play-Token': 'stick-token' })).json(), { plan: 'Pro', torrents: 2 });
+  assert.equal((await get({})).status, 403);
+  globalThis.fetch = async () => new Response('down', { status: 503 });
+  assert.equal((await get({ 'X-Play-Token': 'stick-token' })).status, 502);
 });
