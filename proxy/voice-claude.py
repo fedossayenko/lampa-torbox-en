@@ -8,6 +8,10 @@ answer back: what was asked and the films it may be, each with its confidence; t
 replaced every 30 minutes (today's date in the prompt, the sign-in fresh). Not answering (502: the plan's limit, a
 timeout) is fine: the worker then reads the text with a free model.
 
+POST /recap (lampa-native's Story so far): {key, series, year, upto, episodes: [[label, name, overview]]} -> {text},
+Claude's "previously on" up to that episode, written once by Opus (a one-off `claude -p`, ~20-40 s) and kept in
+~/.lampa-intros/recaps.json under its key ("tv_1396 S2E8").
+
 launchd runs it in the user's session (voice-claude.plist): Claude Code's sign-in is in the login keychain, which
 SSH sessions can't open. Python 3.9, standard library only. Port 8790, the home network.
 Files in ~/lampa-intros: this, voice-prompt.json; ~/.lampa-intros: play_token (the stick's, never printed), voice.log.
@@ -26,6 +30,16 @@ CLAUDE = os.path.expanduser('~/.local/bin/claude')
 MODEL = 'sonnet'  # 12/12 in the test of 2026-10-31 as Opus, ~2 s warm against Opus's 4.5 s
 FRESH_S = 1800
 WAIT_S = 25  # then the stick's fallback
+RECAPS = os.path.expanduser('~/.lampa-intros/recaps.json')
+RECAP_MODEL = 'opus'  # user 2026-11-02: Sonnet or Opus; written once per episode, so the better one
+RECAP_S = 140
+RECAP_PROMPT = (
+    'You write a "previously on" recap for a viewer coming back to a TV series after a break. English, 120-180 '
+    'words, plain prose in two or three short paragraphs: no title, no lists, no markdown. Cover the story up to and '
+    'including the episode named: the main characters, where each one stands, the open threads; the latest episodes '
+    'in the most detail. Never mention or hint at anything that happens after that episode, even if you know the '
+    'series well: when unsure whether something has happened by then, leave it out. Use the episode summaries given '
+    'and your own knowledge of the series up to that episode.')
 
 
 def log(*a):
@@ -99,14 +113,60 @@ def understand(text):
         stop(p)
 
 
+recap_lock = threading.Lock()
+
+
+def recaps():
+    try:
+        with open(RECAPS, encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def recap(o):
+    """Claude's recap up to o['upto'], from the file when written before; None when Claude didn't answer."""
+    key = str(o.get('key', ''))[:80]
+    with recap_lock:
+        kept = recaps().get(key)
+    if kept:
+        return kept
+    lines = [f'{e[0]} "{e[1]}": {e[2]}' for e in o.get('episodes', [])[-60:] if len(e) == 3]
+    msg = (f'Series: {str(o.get("series", ""))[:120]} ({str(o.get("year", ""))[:4]}). The viewer has watched up to '
+           f'{str(o.get("upto", ""))[:40]}.\n\nEpisode summaries (TMDB), oldest first:\n' + '\n'.join(lines)[:20000])
+    r = subprocess.run([CLAUDE, '-p', '--model', RECAP_MODEL, '--output-format', 'json', '--tools', '',
+                        '--strict-mcp-config', '--setting-sources', '', '--no-session-persistence',
+                        '--system-prompt', RECAP_PROMPT], input=msg, capture_output=True, text=True,
+                       timeout=RECAP_S, cwd='/tmp')
+    out = json.loads(r.stdout or '{}')
+    text = (out.get('result') or '').strip()
+    if out.get('is_error') or not text:
+        log('recap:', text[:200] or r.stderr[:200])
+        return None
+    with recap_lock:
+        kept_all = recaps()
+        kept_all[key] = text
+        with open(RECAPS + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump(kept_all, f, ensure_ascii=False)
+        os.replace(RECAPS + '.tmp', RECAPS)
+    return text
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             with open(TOKEN, encoding='utf-8') as f:
                 token = f.read().strip()
-            if self.path != '/understand' or not hmac.compare_digest(
+            if self.path not in ('/understand', '/recap') or not hmac.compare_digest(
                     self.headers.get('X-Play-Token', '').encode(), token.encode()):
                 return self.answer(403, {'error': 'Forbidden.'})
+            if self.path == '/recap':
+                n = min(int(self.headers.get('Content-Length') or 0), 65536)
+                t = time.time()
+                o = json.loads(self.rfile.read(n) or b'{}')
+                text = recap(o)
+                log(f'{time.time() - t:.1f} s recap', repr(o.get('key')), '->', (text or '')[:80])
+                return self.answer(200 if text else 502, {'text': text} if text else {'error': 'No recap.'})
             n = min(int(self.headers.get('Content-Length') or 0), 4096)
             text = str(json.loads(self.rfile.read(n) or b'{}').get('text', '')).strip()[:300]
             if not text:
