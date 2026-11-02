@@ -41,7 +41,8 @@ RECAP_PROMPT = (
     'the story up to and including the episode named: the main characters, where each one stands, the open threads; '
     'the latest episodes in the most detail. Never mention or hint at anything that happens after that episode, even '
     'if you know the series well: when unsure whether something has happened by then, leave it out. Use the episode '
-    'summaries given (some may be in another language) and your own knowledge of the series up to that episode.')
+    'summaries given (some may be in another language) and your own knowledge of the series up to that episode. '
+    'If you know too little about the series to write it, answer exactly NONE.')
 
 
 def log(*a):
@@ -150,7 +151,9 @@ def recap(o):
     out = json.loads(r.stdout or '{}')
     text = (out.get('result') or '').strip()
     log('recap model:', ', '.join(out.get('modelUsage') or {}) or '?')
-    if out.get('is_error') or len(text) < 120:  # 120-180 words (Chinese: ~200 characters); shorter: Claude can't
+    # 120-180 words: 300+ characters (Chinese, Japanese, Korean: ~200); shorter or NONE: Claude can't (kept for good)
+    short = 120 if re.search(r'[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]', text) else 300
+    if out.get('is_error') or text == 'NONE' or len(text) < short:
         log('recap:', text[:200] or r.stderr[:200])
         return None
     with recap_lock:
