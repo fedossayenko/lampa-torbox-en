@@ -241,6 +241,10 @@ test('season in the audio language: its names and overviews where TMDB has the o
   const down = await worker.fetch(new Request('https://w/season/1396/1?lang=RU'), env);
   assert.deepEqual((await down.json()).episodes.map((e) => e[1]), ['Pilot', 'Cat'], 'Russian call failed: English');
   assert.equal(down.headers.get('Cache-Control'), 'max-age=300', 'and kept 5 minutes only');
+  globalThis.fetch = async (url) => (new URL(url).searchParams.get('language') === 'en-US' ? fake(url)
+    : new Response('{"episodes": [', { status: 200 })); // cut off mid-body
+  const broken = await worker.fetch(new Request('https://w/season/1396/1?lang=RU'), env);
+  assert.deepEqual((await broken.json()).episodes.map((e) => e[1]), ['Pilot', 'Cat'], 'a broken Russian body: English');
   globalThis.fetch = fake;
   for (const lang of ['EN', '', 'ru', 'R1']) {
     asked = [];
@@ -955,6 +959,15 @@ test('mine: a new episode out with RU/UA audio goes first in Continue browsing, 
     bm(8, 'thrown', 'tv', 8, { id: 7, name: 'Пилот' })]) });
   const hidden = await (await getMine(e)).json();
   assert.deepEqual(hidden.coming.map(([, c]) => c[2]), ['Dark Matter']);
+  // a My list film not out yet, marked Not interested: not in Coming up either
+  const soon = new Date(Date.now() + 9 * 86400e3).toISOString().slice(0, 10);
+  const later = { id: 77, title: 'Скоро', original_title: 'Soon', release_date: soon, poster_path: '/77.jpg' };
+  cub({ ...answers, 'bookmarks/dump': cubDump([bm(9, 'book', 'movie', 9, later)]),
+    'movie/77': { id: 77, title: 'Soon', release_date: soon, poster_path: '/77.jpg' } });
+  assert.deepEqual((await (await getMine(e)).json()).coming.map(([, c]) => c[2]), ['Soon'], 'listed: shown');
+  cub({ ...answers, 'bookmarks/dump': cubDump([bm(9, 'book', 'movie', 9, later), bm(10, 'thrown', 'movie', 10, later)]),
+    'movie/77': { id: 77, title: 'Soon', release_date: soon, poster_path: '/77.jpg' } });
+  assert.deepEqual((await (await getMine(e)).json()).coming, [], 'Not interested: hidden');
   assert.deepEqual(hidden.new, {});
 });
 

@@ -394,18 +394,17 @@ async function seasonPage(request, env, id, n) {
   const code = new URL(request.url).searchParams.get('lang') || '';
   const lang = /^[A-Z]{2}$/.test(code) && code !== 'EN' ? new Intl.Locale(`und-${code}`).maximize().language : 'en';
   // the language's call failing must not take the en-US answer with it
-  const [res, own] = await Promise.all([tmdb(env, `tv/${id}/season/${n}`),
-    lang === 'en' ? null : tmdb(env, `tv/${id}/season/${n}`, '', lang).catch(() => null)]);
+  const [res, own] = await Promise.all([tmdb(env, `tv/${id}/season/${n}`), lang === 'en' ? null
+    : tmdb(env, `tv/${id}/season/${n}`, '', lang).then((r) => (r.ok ? r.json() : null)).catch(() => null)]);
   if (!res.ok) return corsError(request, `TMDB ${res.status}`, res.status === 404 ? 404 : 502);
-  const told = new Map(own?.ok ? ((await own.json()).episodes || []).filter((e) => e.overview)
-    .map((e) => [e.episode_number, e]) : []);
+  const told = new Map((own?.episodes || []).filter((e) => e.overview).map((e) => [e.episode_number, e]));
   // air_date: lampa-native's "Airs Tuesday, 10 Nov" on an episode not out yet (TMDB names it "Episode 4" till then)
   const episodes = ((await res.json()).episodes || []).map((e) => {
     const t = told.get(e.episode_number) || e;
     return [e.episode_number, t.name || e.name || '', e.runtime || 0, t.overview || '', e.still_path || '', e.air_date || ''];
   });
   // en-US only because the language's call failed: kept 5 minutes, not a day
-  const age = lang !== 'en' && !own?.ok ? 300 : 86400;
+  const age = lang !== 'en' && !own ? 300 : 86400;
   return new Response(JSON.stringify({ episodes }), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': `max-age=${age}`, ...corsHeaders(request) },
   });
