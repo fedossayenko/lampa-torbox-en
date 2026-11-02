@@ -1198,7 +1198,8 @@ const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 // watch / not mine), the series with a new episode out (nextNew, freshOut): first in Continue browsing, and "mylist":
 // ["movie_603", ...], what My list holds (the film page's ⋯ adds or removes), "left": {"movie_603": 4000, ...}, the
 // seconds left of each film started (3 min in, under 90 %, not graded), for its poster, and "tv_1399": "26 ep", a
-// series' aired episodes after your furthest watched one (none when caught up), and "seen": ["movie_603", ...],
+// series' aired episodes after your furthest watched one (none when caught up), "percent": {"movie_603": 43, ...},
+// how far in each of those films is (a Continue tile's bar), and "seen": ["movie_603", ...],
 // the films in the history played to 90 % (graded or not): a genre page hides them with the graded and marked ones.
 // A graded film is watched (user 2026-11-01): out of My list, Finish later and Continue browsing; a graded series may be
 // watched on (Foundation: Good after season 1), so only "not mine" (skip) takes it out.
@@ -1316,11 +1317,12 @@ async function mine(request, env) {
     ...lists.slice(1).map(([title, l]) => [title, l.map(cardFor)])]) {
     if (cards.length) rows.push([title, cards]);
   }
-  const left = {};
+  const left = {}, percent = {}; // percent: how far in, for the app's Continue tile bar
   for (const h of recent) {
     if (h.type === 'movie' && !['viewed', 'thrown'].includes(marks[`movie_${h.card.id}`]) && started(h)) {
       const p = points.get(hash(h.card));
       left[`movie_${h.card.id}`] = p.duration - p.time;
+      percent[`movie_${h.card.id}`] = p.percent;
     }
   }
   for (const [id, at] of places) {
@@ -1328,7 +1330,7 @@ async function mine(request, env) {
   }
   const seen = all.filter((b) => b.card_type === 'movie').map((b) => [keyOf(b), parsed(b)])
     .filter(([, h]) => h && done.get(hash(h.card))?.percent >= 90).map(([k]) => k);
-  return new Response(JSON.stringify({ rows, marks, grades, new: fresh, mylist: listed.map(keyOf), left,
+  return new Response(JSON.stringify({ rows, marks, grades, new: fresh, mylist: listed.map(keyOf), left, percent,
     seen: [...new Set(seen)] }), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(request) },
   });
