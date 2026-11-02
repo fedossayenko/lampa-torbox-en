@@ -73,6 +73,12 @@ test('film page: display-ready strings, the verdict first, then TMDB and the MDB
           'Florence Pugh'].map((name) => ({ name, character: 'x' })),
         crew: [{ job: 'Producer', name: 'Mary Parent' }, { job: 'Director', name: 'Denis Villeneuve' }],
       },
+      recommendations: { results: [
+        { id: 438631, media_type: 'movie', title: 'Dune', release_date: '2021-09-15', poster_path: '/d.jpg', vote_count: 12000, vote_average: 7.8 },
+        { id: 1, media_type: 'movie', title: 'No poster', release_date: '2020-01-01', poster_path: null, vote_count: 900 },
+        { id: 2, media_type: 'movie', title: 'Few votes', release_date: '2020-01-01', poster_path: '/f.jpg', vote_count: 12 },
+        { id: 3, media_type: 'movie', title: 'Not out', release_date: '2999-01-01', poster_path: '/n.jpg', vote_count: 900 },
+      ] },
     },
     '/tmdb/movie/7': {
       ratings: [
@@ -101,6 +107,8 @@ test('film page: display-ready strings, the verdict first, then TMDB and the MDB
     parts: [],
     trailer: '',
     runtime: 166, // minutes: the app's "ends at 23:41"
+    // More like this: TMDB's recommendations from the same call; no poster, under 50 votes, not out: left out
+    similar: [[438631, 'movie', 'Dune', '2021', '/d.jpg', 78, '']],
   });
 });
 
@@ -139,7 +147,7 @@ test('film page: its trailer, the newest official YouTube Trailer, else any Trai
   assert.equal(await trailerOf([v('fan', 'Trailer', false, '2024-01-01'), v('tease', 'Teaser', true, '2024-02-01')]), 'fan');
   assert.equal(await trailerOf([v('tease', 'Teaser', true, '2024-02-01'), v('clip', 'Featurette', true, '2024-03-01')]), 'tease');
   assert.equal(await trailerOf([]), '');
-  assert.ok(asked[0].includes('append_to_response=credits,external_ids,videos'), 'the same TMDB call');
+  assert.ok(asked[0].includes('append_to_response=credits,external_ids,videos,recommendations'), 'the same TMDB call');
 });
 
 test('a collection with nothing but this film: no collection row', async () => {
@@ -188,7 +196,7 @@ test('film page without MDBList still opens; fields TMDB leaves out are empty st
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(),
     { name: 'Film', original: '', line: '', overview: '', scores: [], seasons: [], imdb: '', episodes: [], people: '',
-      cast: [], collection: '', parts: [], trailer: '', runtime: 0 });
+      cast: [], collection: '', parts: [], trailer: '', runtime: 0, similar: [] });
 });
 
 test('film page answers TMDB\'s 404 as 404 and other TMDB failures as 502', async () => {
