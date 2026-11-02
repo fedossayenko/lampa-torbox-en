@@ -887,8 +887,8 @@ test('mine: a new episode out with RU/UA audio goes first in Continue browsing, 
   assert.deepEqual(first.next, { tv_93740: 'S3 E5 · up next', tv_270476: 'S1 E2 · up next', tv_85552: 'S3 E8 · up next',
     tv_60574: 'S1 E4 · up next', tv_196322: 'S2 E1 · up next' }, 'Continue browsing\'s tiles: the episode after the furthest watched');
   assert.deepEqual(first.coming.map(([date, c, what, state, episode]) => [date, c[2], what, state, episode]), [
-    [day(0), 'Foundation', 'S3 E5 · out with RU/UA audio · next after your E4', 'out', [3, 5]],
-    [day(0), 'Dark Matter', 'Season 2 starts · out in English · you finished season 1', 'waiting', [2, 1]],
+    [day(0), 'Foundation', 'S3 E5 · out in Russian or Ukrainian · next after your E4', 'out', [3, 5]],
+    [day(0), 'Dark Matter', 'Season 2 starts · English only so far · you finished season 1', 'waiting', [2, 1]],
     [day(-5), 'Severance', 'S1 E2 · next after your E1', 'airs', [1, 2]],
     [day(-10), 'Peaky Blinders', "Season 3 starts · you're on S1 E4", 'airs', [3, 1]],
     [day(-20), 'Pilot', 'Season 1 starts', 'airs', [1, 1]]],
@@ -905,6 +905,19 @@ test('mine: a new episode out with RU/UA audio goes first in Continue browsing, 
   e.DB.raw.prepare('UPDATE fresh SET t = 0, out = NULL').run();
   cub({ ...answers, '/stream/series/tt0804484:3:5.json': undefined });
   assert.deepEqual((await (await getMine(e)).json()).new, {}, 'Torrentio down: no label');
+  // the stick's own audio languages (user 2026-11-02): Ukrainian only, English, any
+  cub({ ...answers, '/stream/series/tt12688584:2:1.json': { streams: [{ ...en.streams[0], title: en.streams[0].title + '\n🇺🇦' }] } });
+  const lang = async (q) => (await (await worker.fetch(new Request('https://w/mine?lang=' + q, { headers: lampa }), e)).json())
+    .coming.slice(0, 2).map(([, c, what, state]) => [c[2], what, state]);
+  assert.deepEqual(await lang('UA'), [
+    ['Dark Matter', 'Season 2 starts · out in Ukrainian · you finished season 1', 'out'],
+    ['Foundation', 'S3 E5 · English only so far · next after your E4', 'waiting']], 'Foundation has 🇷🇺 / 🇬🇧 only');
+  cub(answers);
+  assert.deepEqual((await lang('EN')).map(([, what, state]) => [what.split(' · ')[1], state]),
+    [['out in English', 'out'], ['out in English', 'out']], 'no flags = English');
+  cub({ ...answers, '/stream/series/tt0804484:3:5.json': { streams: [] }, '/stream/series/tt12688584:2:1.json': { streams: [] } });
+  assert.deepEqual((await lang('')).map(([, what, state]) => [what.split(' · ')[1], state]),
+    [['no release yet', 'waiting'], ['no release yet', 'waiting']], 'any language, nothing out');
 });
 
 test('mine: a new season years later: any series in the history, past its newest 100; not a Not interested one', async () => {

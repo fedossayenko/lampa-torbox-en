@@ -1146,21 +1146,46 @@ function nextNew(s, at, now) {
   return aired > w[2] && now - aired <= NEW_DAYS * 86400e3 ? next : null;
 }
 
-// Which of those new episodes are out with Russian or Ukrainian audio (the app's default languages; a dub comes days
-// after the air date): Torrentio's flags, asked at most every FRESH_EVERY per episode until it is (fresh.sql), up
-// to FRESH_MAX a request; its failures are asked again next time. [{key, imdb, next}] in, the keys out.
+// The audio languages the stick asks Coming up about (its own setting, user 2026-11-02: the app in English, the audio
+// Russian): /mine?lang=RU,UA, Torrentio's flag codes; "" any language; none given (an older app) RU,UA.
+function askedLangs(request) {
+  const q = new URL(request.url).searchParams.get('lang');
+  return (q === null ? 'RU,UA' : q).split(',').map((c) => c.trim().toUpperCase()).filter((c) => /^[A-Z]{2}$/.test(c));
+}
+
+// "Russian or Ukrainian": a flag's likely language in English (UA → Ukrainian, as the app's Audio languages sheet)
+function langNames(codes) {
+  const names = new Intl.DisplayNames(['en'], { type: 'language' });
+  const one = (c) => {
+    if (c === 'EN') return 'English';
+    try {
+      return names.of(new Intl.Locale(`und-${c}`).maximize().language);
+    } catch {
+      return c;
+    }
+  };
+  return [...new Set(codes.map(one))].join(' or ');
+}
+
+// Which of those new episodes are out in the asked audio languages (a dub comes days after the air date; none asked:
+// any release): Torrentio's flags, asked at most every FRESH_EVERY per episode until it is (fresh.sql, keyed per
+// language set; RU,UA's keys are the ones from before the setting), up to FRESH_MAX a request; its failures are
+// asked again next time. [{key, imdb, next}] in, the keys out.
 const FRESH_EVERY = 3 * 3600e3;
 const FRESH_MAX = 5;
-async function freshOut(env, list) {
+async function freshOut(env, list, langs = ['RU', 'UA']) {
   if (!env.DB || !list.length) return new Set();
   const now = Date.now();
+  const tag = langs.join(',') === 'RU,UA' ? '' : `|${langs.join(',')}`;
   const rows = new Map((await env.DB.prepare('SELECT key, out, t FROM fresh WHERE key IN (SELECT value FROM json_each(?))')
-    .bind(JSON.stringify(list.map((x) => x.key))).all().then((r) => r.results).catch(() => [])).map((r) => [r.key, r]));
-  const due = list.filter((x) => !rows.get(x.key)?.out && now - (rows.get(x.key)?.t || 0) >= FRESH_EVERY).slice(0, FRESH_MAX);
+    .bind(JSON.stringify(list.map((x) => x.key + tag))).all().then((r) => r.results).catch(() => [])).map((r) => [r.key, r]));
+  const row = (x) => rows.get(x.key + tag);
+  const wanted = (st) => !langs.length || languagesOf(String(st.title)).some((c) => langs.includes(c));
+  const due = list.filter((x) => !row(x)?.out && now - (row(x)?.t || 0) >= FRESH_EVERY).slice(0, FRESH_MAX);
   const asked = (await Promise.all(due.map(({ key, imdb, next }) => fetch(
     `https://torrentio.strem.fun/stream/series/${imdb}:${next[0]}:${next[1]}.json`, { signal: AbortSignal.timeout(5000) })
     .then((res) => (res.ok ? res.json() : null))
-    .then((j) => j && { key, out: (j.streams || []).some((st) => /🇷🇺|🇺🇦/u.test(String(st.title))) ? now : null, t: now })
+    .then((j) => j && { key: key + tag, out: (j.streams || []).some(wanted) ? now : null, t: now })
     .catch(() => null)))).filter(Boolean);
   if (asked.length) {
     await env.DB.prepare(`INSERT INTO fresh (key, out, t) SELECT value->>'key', value->>'out', value->>'t'
@@ -1168,7 +1193,7 @@ async function freshOut(env, list) {
       .bind(JSON.stringify(asked)).run().catch(() => {}); // asked again next time
   }
   for (const a of asked) rows.set(a.key, a);
-  return new Set(list.filter((x) => rows.get(x.key)?.out).map((x) => x.key));
+  return new Set(list.filter((x) => row(x)?.out).map((x) => x.key));
 }
 
 // New in 4K (user 2026-10-31): CUB's own list of the latest 4K releases (Lampa's "In high quality" row). Its 4K
@@ -1359,7 +1384,8 @@ async function mine(request, env) {
     const next = s && s.imdb && places.has(s.id) ? nextNew(s, places.get(s.id), Date.now()) : null;
     return next && { h, next, imdb: s.imdb, key: `${h.card.id}/${next[0]}/${next[1]}` };
   }).filter(Boolean);
-  const out = await freshOut(env, newOnes);
+  const langs = askedLangs(request);
+  const out = await freshOut(env, newOnes, langs);
   const fresh = {};
   for (const x of newOnes) if (out.has(x.key)) fresh[`tv_${x.h.card.id}`] = `S${x.next[0]} E${x.next[1]}`;
   const isNew = (h) => h.type === 'tv' && `tv_${h.card.id}` in fresh && !gradedOut(h);
@@ -1406,8 +1432,8 @@ async function mine(request, env) {
     next[`tv_${id}`] = `S${n[0]} E${n[1]} · ${p && p.time >= 60 && p.duration > p.time ? leftText(p.duration - p.time) : 'up next'}`;
   }
   // Coming up (user's design 2026-11-02), [date, card, what, state, [season, episode] (a series')] by date, ""
-  // (later, or no date) last: the next episode of each series you follow for four weeks: a new one aired (out with
-  // RU/UA audio, state "out", or only in English so far, "waiting": dated today), or the next to air once you're caught
+  // (later, or no date) last: the next episode of each series you follow for four weeks: a new one aired (out in your
+  // audio languages, state "out", or only in English so far, "waiting": dated today), or the next to air once you're caught
   // up ("airs"); a new season's start wherever you are in it ("airs", user 2026-11-02); and My list's films not out
   // yet ("film": in four weeks, else "").
   const today = new Date().toISOString().slice(0, 10);
@@ -1415,8 +1441,11 @@ async function mine(request, env) {
   // "S6 E3 · next after your E2", "Season 4 starts · you finished season 3"
   const what = ([n, e], w, how) => (e === 1 ? `Season ${n} starts${how} · you finished season ${w[0]}`
     : `S${n} E${e}${how} · next after your E${w[1]}`);
+  // "out in Russian or Ukrainian", "English only so far" (English asked too, or any language: "no release yet")
+  const waiting = !langs.length || langs.includes('EN') ? ' · no release yet' : ' · English only so far';
+  const outIn = langs.length ? ` · out in ${langNames(langs)}` : ' · out';
   const coming = newOnes.map((x) => [today, JSON.parse(info.get(Number(x.h.card.id)).card), what(x.next,
-    places.get(Number(x.h.card.id)).w, out.has(x.key) ? ' · out with RU/UA audio' : ' · out in English'),
+    places.get(Number(x.h.card.id)).w, out.has(x.key) ? outIn : waiting),
   out.has(x.key) ? 'out' : 'waiting', x.next]);
   for (const h of followed) {
     const s = info.get(Number(h.card.id));
