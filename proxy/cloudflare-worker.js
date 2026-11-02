@@ -1296,6 +1296,16 @@ const MARKS = ['look', 'viewed', 'scheduled', 'continued', 'thrown'];
 const FILM_STARTED_S = 180; // a film in Continue browsing: watched 3 min (5 until 2026-11-01: sooner, user)
 const AWAY = new Set(['viewed', 'scheduled', 'thrown']);
 
+// A CUB bookmark's card: {type, card} (Lampa's card as JSON text in it), null for one without a TMDB id.
+function bookmarkCard(b) {
+  try {
+    const card = typeof b.data === 'string' ? JSON.parse(b.data) : b.data;
+    return card && card.id && (!card.source || /^(tmdb|cub)$/i.test(card.source)) ? { type: b.card_type, card } : null; // others: no TMDB id
+  } catch {
+    return null;
+  }
+}
+
 // GET /mine with the app's CUB sign-in (X-Cub-Token, X-Cub-Profile; accounts in CUB_ACCOUNTS only, as /grades) ->
 // {"rows": [...] as /home, "marks": {"tv_93740": "scheduled", ...}, "grades": {"movie_603": 2, ...}, "new":
 // {"tv_93740": "S3 E5", ...}}: the rows of Lampa's CUB home that are yours, for the top of lampa-native's Home,
@@ -1333,14 +1343,6 @@ async function mine(request, env) {
   for (const m of ours) marks[m.card] = m.mark;
   const grades = {};
   for (const [k, v] of Object.entries(graded || {})) if (v && v.g != null) grades[k] = v.g; // null: removed
-  const parsed = (b) => {
-    try {
-      const card = typeof b.data === 'string' ? JSON.parse(b.data) : b.data;
-      return card && card.id && (!card.source || /^(tmdb|cub)$/i.test(card.source)) ? { type: b.card_type, card } : null; // others: no TMDB id
-    } catch {
-      return null;
-    }
-  };
   const byTime = (a, b) => (Number(b.time) || 0) - (Number(a.time) || 0);
   const newest = (...types) => dump.bookmarks.filter((b) => types.includes(b.type) && /^(movie|tv)$/.test(b.card_type)).sort(byTime);
   const keyOf = (b) => `${b.card_type}_${b.card_id}`;
@@ -1350,18 +1352,18 @@ async function mine(request, env) {
   };
   const markOf = (b) => marks[keyOf(b)];
   const all = newest('history');
-  const recent = all.slice(0, 100).map((b) => (AWAY.has(markOf(b)) ? { ...parsed(b), away: true } : parsed(b)))
+  const recent = all.slice(0, 100).map((b) => (AWAY.has(markOf(b)) ? { ...bookmarkCard(b), away: true } : bookmarkCard(b)))
     .filter((h) => h?.card);
   const history = recent.filter((h) => !h.away);
-  const later = once([...all.filter((b) => markOf(b) === 'scheduled'), ...newest('scheduled')]).slice(0, 40).map(parsed)
+  const later = once([...all.filter((b) => markOf(b) === 'scheduled'), ...newest('scheduled')]).slice(0, 40).map(bookmarkCard)
     .filter(Boolean);
   // My list (user 2026-10-31: one list, not three): Lampa's Bookmarks and Later together, newest first
   const listed = once(newest('book', 'wath'));
-  const mylist = listed.slice(0, 40).map(parsed).filter(Boolean);
+  const mylist = listed.slice(0, 40).map(bookmarkCard).filter(Boolean);
   const series = history.filter((h) => h.type === 'tv').slice(0, 30);
   // every series in the history but Not interested and Finish later ones: a new season may come years later
   const followed = once(all.filter((b) => b.card_type === 'tv' && !['thrown', 'scheduled'].includes(markOf(b))))
-    .map(parsed).filter(Boolean);
+    .map(bookmarkCard).filter(Boolean);
   const info = await shows(env, [...new Set([...series, ...later, ...followed, ...mylist].filter((h) => h.type === 'tv')
     .map((h) => Number(h.card.id)))]);
   const hash = (c) => lampaHash(c.original_title || c.title || '');
@@ -1506,7 +1508,7 @@ async function mine(request, env) {
   for (const [id, at] of places) {
     if (at.w && at.left && grades[`tv_${id}`] !== 'skip' && !['viewed', 'thrown'].includes(marks[`tv_${id}`])) left[`tv_${id}`] = `${at.left} ep`;
   }
-  const seen = all.filter((b) => b.card_type === 'movie').map((b) => [keyOf(b), parsed(b)])
+  const seen = all.filter((b) => b.card_type === 'movie').map((b) => [keyOf(b), bookmarkCard(b)])
     .filter(([, h]) => h && done.get(hash(h.card))?.percent >= 90).map(([k]) => k);
   return new Response(JSON.stringify({ rows, marks, grades, new: fresh, mylist: listed.map(keyOf), left, percent,
     seen: [...new Set(seen)], next, coming }), {
@@ -1514,11 +1516,114 @@ async function mine(request, env) {
   });
 }
 
+// GET /mine/history?tz=<the stick's minutes east of UTC> (user's design 2026-11-02, canvas board History): what was
+// played here and in Lampa, newest first: {items: [[t (ms), card, what, left, lampa, [hash, ...]], ...]}, 100 at most.
+// A title of CUB's history once for each day it was played: the timeline's dated points (lampa-native's carry the card,
+// Lampa's only its hash: matched by the history's original titles and, for episodes, shows' seasons: 66 of 67 on
+// 2026-11-02), a series' episodes of that day on one row ("S1 E6 and E7"). A title with no dated point (Lampa's
+// points before 2026-08 carry none): one row at CUB's own time (when it last went to the history's front), with its
+// furthest point (and only it to Mark unwatched). CUB's time on a later day than any point (a play that saved none:
+// under a minute, or DDD's answer lost): a row of its own that day with nothing known. what: the episodes, "" a film;
+// left: the newest point's seconds left, 0 watched (90 %), -1 no point; lampa: 1 when Lampa played all of it (points without
+// a card), 0 here or not known; the hashes: the row's points (Mark unwatched). Two films of one original title share
+// Lampa's key (Lampa's own timeline does too).
+// Points under a minute (a release tried) are left out.
+// ponytail: a film played here and later in Lampa keeps the card, so it says "here"; a column per point if it matters
+const HISTORY_MAX = 100;
+const HISTORY_TITLES = 150; // the newest: their JSON and episodes' keys are the CPU (~5 ms locally, as /mine)
+const TRIED_S = 60;
+const DATED = Date.UTC(2020, 0, 1); // Lampa's undated points say 1970
+function episodesText(eps) {
+  if (!eps.length) return '';
+  const [first, last] = [eps[0], eps.at(-1)];
+  const lastText = last[0] === first[0] ? `E${last[1]}` : `S${last[0]} E${last[1]}`;
+  return eps.length === 1 ? `S${first[0]} E${first[1]}` : `S${first[0]} E${first[1]} ${eps.length === 2 ? 'and' : 'to'} ${lastText}`;
+}
+async function historyPage(request, env) {
+  const who = await cubUser(request, env);
+  if (!who) return corsError(request, 'CUB sign-in required.', 401);
+  const dump = await cubApi(request, 'bookmarks/dump');
+  if (!dump || !Array.isArray(dump.bookmarks)) return corsError(request, 'CUB unavailable.', 502);
+  const tz = Math.max(-840, Math.min(840, Number(new URL(request.url).searchParams.get('tz')) || 0)) * 60e3;
+  const titles = new Map(); // "movie_603" → {type, card, t}: each title once, its newest history bookmark
+  for (const b of dump.bookmarks.filter((x) => x.type === 'history').sort((x, y) => (Number(y.time) || 0) - (Number(x.time) || 0))) {
+    if (titles.size >= HISTORY_TITLES) break;
+    const h = /^(movie|tv)$/.test(b.card_type) && !titles.has(`${b.card_type}_${b.card_id}`) && bookmarkCard(b);
+    if (h) titles.set(`${h.type}_${h.card.id}`, { ...h, t: Number(b.time) || 0 });
+  }
+  const info = await shows(env, [...titles.values()].filter((h) => h.type === 'tv').map((h) => Number(h.card.id)));
+  const of = new Map(); // Lampa's key → [title, season, episode]
+  for (const [key, h] of titles) {
+    if (h.type === 'movie') of.set(lampaHash(h.card.original_title || h.card.title || ''), [key, 0, 0]);
+    const s = h.type === 'tv' && info.get(Number(h.card.id));
+    for (const [n, count] of s ? JSON.parse(s.seasons || '[]') : []) {
+      for (let e = 1; e <= count; e++) of.set(episodeKey([n, e], s.original), [key, n, e]);
+    }
+  }
+  // ponytail: every point read (433 on 2026-11-02, one small query), as GET /timeline does
+  const points = env.DB ? await env.DB.prepare('SELECT * FROM timeline').all().then((r) => r.results).catch(() => []) : [];
+  const played = new Map();
+  for (const p of points) {
+    const at = p.card ? [p.card, p.season || 0, p.episode || 0] : of.get(p.hash);
+    if (!at || !titles.has(at[0]) || (p.time < TRIED_S && p.percent < 90)) continue;
+    if (!played.has(at[0])) played.set(at[0], []);
+    played.get(at[0]).push({ ...p, s: at[1], e: at[2] });
+  }
+  const items = [];
+  const byEpisode = (a, b) => a.s - b.s || a.e - b.e;
+  for (const [key, h] of titles) {
+    const all = played.get(key) || [];
+    const days = new Map();
+    for (const p of all.filter((x) => x.updated > DATED)) {
+      const d = Math.floor((p.updated + tz) / 86400e3);
+      days.set(d, [...(days.get(d) || []), p]);
+    }
+    const cubDay = Math.floor((h.t + tz) / 86400e3);
+    if (!days.size) days.set(null, all);
+    else if (!days.has(cubDay) && h.t > Math.max(...[...days.values()].flat().map((p) => p.updated))) days.set(cubDay, []);
+    for (const [d, ps] of days) {
+      const newest = d === null ? [...ps].sort(byEpisode).at(-1) : ps.reduce((a, b) => (!a || b.updated > a.updated ? b : a), null);
+      const eps = h.type !== 'tv' ? [] : d === null ? (newest?.s > 0 ? [newest] : [])
+        : [...new Map(ps.sort(byEpisode).filter((p) => p.s > 0).map((p) => [`${p.s}:${p.e}`, p])).values()];
+      items.push([d === null || !newest ? h.t : newest.updated, h, episodesText(eps.map((p) => [p.s, p.e])),
+        !newest ? -1 : newest.percent >= 90 ? 0 : Math.max(0, newest.duration - newest.time), ps.length && ps.every((p) => !p.card) ? 1 : 0,
+        d === null ? (newest ? [newest.hash] : []) : ps.map((p) => p.hash)]);
+    }
+  }
+  items.sort((a, b) => b[0] - a[0]);
+  const shown = items.slice(0, HISTORY_MAX);
+  // English cards: a series' from shows, the others from the search index or TMDB (15 a request at most)
+  const rest = [...new Map(shown.map(([, h]) => h).filter((h) => !(h.type === 'tv' && info.has(Number(h.card.id))))
+    .map((h) => [`${h.type}:${h.card.id}`, h])).values()];
+  const english = await englishCards(env, rest.map((h) => [h.type, Number(h.card.id)]), rest.map((h) => cardOf(h.card, h.type)), 15);
+  const cards = new Map(rest.map((h, i) => [`${h.type}:${h.card.id}`, english[i]]));
+  const cardFor = (h) => (h.type === 'tv' && info.has(Number(h.card.id)) ? JSON.parse(info.get(Number(h.card.id)).card)
+    : cards.get(`${h.type}:${h.card.id}`));
+  return new Response(JSON.stringify({ items: shown.map(([t, h, ...more]) => [t, cardFor(h), ...more]) }), {
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(request) },
+  });
+}
+
+// POST /mine/unwatch {hashes: [Lampa's key, ...]} (the same sign-in) -> 204: History's Mark unwatched. The points go
+// back to the start, stamped now, so Lampa takes them too (the newer wins).
+async function unwatch(request, env) {
+  if (!(await cubUser(request, env))) return corsError(request, 'CUB sign-in required.', 401);
+  const hashes = (await request.json().catch(() => ({}))).hashes;
+  if (!Array.isArray(hashes) || !hashes.length || hashes.length > 2000 || !hashes.every((h) => /^\d{1,10}$/.test(String(h)))) {
+    return corsError(request, 'Bad hashes.', 400);
+  }
+  if (!env.DB) return corsError(request, 'No database.', 502);
+  await env.DB.prepare('UPDATE timeline SET time = 0, percent = 0, updated = ?2 WHERE hash IN (SELECT value FROM json_each(?1))')
+    .bind(JSON.stringify(hashes.map(String)), Date.now()).run();
+  return new Response(null, { status: 204, headers: corsHeaders(request) });
+}
+
 // POST /mine/<list>/movie/<tmdb id> or /mine/<list>/tv/<tmdb id> (the same sign-in) -> 204. history: a film played
 // here goes to the front of Lampa's history, as Lampa puts one there when its torrents open (torrent.js): Lampa's
 // recommendations and Continue browsing come from it; one already there is moved (its bookmark id, as Lampa sends
 // it). The card as Lampa keeps one (Utils.clearCard's fields, TMDB en-US). scheduled, thrown, viewed: the film's
-// mark (one at a time, as Lampa's), none: no mark; in D1 (CUB's marks need Premium).
+// mark (one at a time, as Lampa's), none: no mark; in D1 (CUB's marks need Premium). unhistory: out of the history
+// (History's Remove), as Lampa removes one.
 // lampa-native's voice search: the remote's voice button records the request on the stick (16 kHz WAV).
 // POST /voice/hear (the stick's X-Play-Token, the WAV) -> {text}: Deepgram Nova-3 on Workers AI (~0.4 s; English,
 // Russian). The stick then asks Claude Code on the old MacBook what was meant (voice-claude.py, voice-prompt.json's
@@ -1624,7 +1729,7 @@ const LAMPA_FIELDS = ['poster_path', 'overview', 'release_date', 'id', 'original
 async function bookmark(request, env, list, type, id) {
   const who = await cubUser(request, env);
   if (!who) return corsError(request, 'CUB sign-in required.', 401);
-  if (!['history', 'book', 'unbook'].includes(list)) {
+  if (!['history', 'book', 'unbook', 'unhistory'].includes(list)) {
     if (!env.DB) return corsError(request, 'No database.', 502);
     await (list === 'none'
       ? env.DB.prepare('DELETE FROM marks WHERE who = ? AND card = ?').bind(who, `${type}_${id}`)
@@ -1633,22 +1738,27 @@ async function bookmark(request, env, list, type, id) {
     ).run();
     return new Response(null, { status: 204, headers: corsHeaders(request) });
   }
-  const [res, dump] = await Promise.all([tmdb(env, `${type}/${id}`), cubApi(request, 'bookmarks/dump')]);
-  if (!res.ok || !dump || !Array.isArray(dump.bookmarks)) return corsError(request, 'TMDB or CUB unavailable.', 502);
-  const m = await res.json();
-  const card = { source: 'tmdb', genre_ids: (m.genres || []).map((g) => g.id) };
-  for (const k of LAMPA_FIELDS) if (m[k] != null) card[k] = m[k];
-  if (card.poster_path) card.img = `https://image.tmdb.org/t/p/w300${card.poster_path}`;
-  const data = JSON.stringify(card);
+  // removing: each bookmark with the card CUB keeps in it (as Lampa sends one), no TMDB; unhistory is History's Remove
+  const removes = { unbook: ['book', 'wath'], unhistory: ['history'] }[list];
+  const [res, dump] = await Promise.all([removes ? null : tmdb(env, `${type}/${id}`), cubApi(request, 'bookmarks/dump')]);
+  if ((!removes && !res.ok) || !dump || !Array.isArray(dump.bookmarks)) return corsError(request, 'TMDB or CUB unavailable.', 502);
   const mine = dump.bookmarks.filter((b) => String(b.card_id) === String(id) && b.card_type === type);
-  const send = async (method, kind, bookmarkId) => {
+  const send = async (method, kind, bookmarkId, data) => {
     const json = await cubApi(request, `bookmarks/${method}`, { type: kind, data, card_id: String(id), id: String(bookmarkId) });
     if (!json || json.error) throw new Error(`CUB refused ${method} ${kind}${json ? ` (${json.code})` : ''}`);
   };
   try {
-    if (list === 'unbook') {
-      for (const b of mine.filter((x) => x.type === 'book' || x.type === 'wath')) await send('remove', b.type, b.id);
-    } else await send('add', list, mine.find((b) => b.type === list)?.id ?? 0);
+    if (removes) {
+      for (const b of mine.filter((x) => removes.includes(x.type))) {
+        await send('remove', b.type, b.id, typeof b.data === 'string' ? b.data : JSON.stringify(b.data));
+      }
+    } else {
+      const m = await res.json();
+      const card = { source: 'tmdb', genre_ids: (m.genres || []).map((g) => g.id) };
+      for (const k of LAMPA_FIELDS) if (m[k] != null) card[k] = m[k];
+      if (card.poster_path) card.img = `https://image.tmdb.org/t/p/w300${card.poster_path}`;
+      await send('add', list, mine.find((b) => b.type === list)?.id ?? 0, JSON.stringify(card));
+    }
   } catch (e) {
     return corsError(request, `${e.message}.`, 502);
   }
@@ -1709,8 +1819,10 @@ export default {
     if (file && /^(GET|HEAD)$/.test(request.method)) return stream(request, env, ctx, file[1], file[2]);
     if (new URL(request.url).pathname === '/timeline') return timeline(request, env);
     if (new URL(request.url).pathname === '/mine' && request.method === 'GET') return mine(request, env);
+    if (new URL(request.url).pathname === '/mine/history' && request.method === 'GET') return historyPage(request, env);
+    if (new URL(request.url).pathname === '/mine/unwatch' && request.method === 'POST') return unwatch(request, env);
     const listed = new URL(request.url).pathname
-      .match(/^\/mine\/(history|book|unbook|viewed|scheduled|thrown|none)\/(movie|tv)\/(\d+)$/);
+      .match(/^\/mine\/(history|unhistory|book|unbook|viewed|scheduled|thrown|none)\/(movie|tv)\/(\d+)$/);
     if (listed && request.method === 'POST') return bookmark(request, env, listed[1], listed[2], listed[3]);
     if (new URL(request.url).pathname === '/voice/hear' && request.method === 'POST') return voiceHear(request, env);
     if (new URL(request.url).pathname === '/voice/find' && request.method === 'POST') return voiceFind(request, env);

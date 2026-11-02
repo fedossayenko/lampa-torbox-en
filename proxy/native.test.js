@@ -1208,6 +1208,93 @@ test('mine/history: a film played on the stick goes to the front of Lampa\'s his
   assert.equal((await post('tv/1399')).status, 401);
 });
 
+test('history: each title once a day it was played, newest first, in the stick\'s time zone; Lampa\'s points by hash', async () => {
+  const e = mineEnv();
+  const at = (iso) => Date.parse(iso);
+  const point = (key, time, percent, updated, card = null, season = null, episode = null) => e.DB.raw.prepare(
+    'INSERT INTO timeline (hash, time, duration, percent, updated, card, season, episode) VALUES (?, ?, 3000, ?, ?, ?, ?, ?)')
+    .run(lampaHashOf(key), time, percent, updated, card, season, episode);
+  point('15Dark Matter', 2900, 97, at('2026-10-27T19:00Z')); // Lampa's: 21:00 at UTC+2
+  point('16Dark Matter', 2950, 98, at('2026-10-27T20:00Z'));
+  point('17Dark Matter', 2990, 100, at('2026-10-27T22:30Z')); // 00:30 the next day there
+  point('21Dark Matter', 3000, 100, at('2026-10-31T16:49Z'));
+  point('22Dark Matter', 500, 16, at('2026-11-02T20:00Z'), 'tv_196322', 2, 2); // played here
+  point('Top Gun: Maverick', 2800, 93, at('2026-11-01T19:25Z'), 'movie_361743');
+  point('Star Wars', 3000, 100, 0); // Lampa's, before its points carried a time
+  point('Never', 5, 0, at('2026-10-20T10:00Z')); // a release tried: left out
+  point('Not in the history', 900, 30, at('2026-11-02T10:00Z'));
+  const answers = {
+    'users/get': { user: { id: 42 } },
+    'bookmarks/dump': cubDump([
+      bm(1, 'history', 'tv', at('2026-11-02T20:00Z'), { id: 196322, name: 'Тёмная материя' }),
+      bm(2, 'history', 'movie', at('2026-11-02T18:00Z'), { id: 361743, title: 'Топ Ган: Мэверик', original_title: 'Top Gun: Maverick' }),
+      bm(3, 'history', 'movie', at('2025-05-01T12:00Z'), { id: 11, title: 'Звёздные войны', original_title: 'Star Wars' }),
+      bm(4, 'history', 'movie', at('2025-06-01T12:00Z'), { id: 12, title: 'Никогда', original_title: 'Never' }),
+      bm(5, 'history', 'tv', at('2024-01-01T12:00Z'), { id: 196322, name: 'Тёмная материя' }),
+      bm(6, 'book', 'movie', at('2026-11-02T21:00Z'), { id: 13, title: 'Закладка' }),
+    ]),
+    'tv/196322': { id: 196322, name: 'Dark Matter', original_name: 'Dark Matter', poster_path: '/d.jpg',
+      seasons: [{ season_number: 1, episode_count: 9 }, { season_number: 2, episode_count: 10 }],
+      last_episode_to_air: { season_number: 2, episode_number: 3 } },
+    'movie/361743': { id: 361743, title: 'Top Gun: Maverick', release_date: '2022-05-21', poster_path: '/t.jpg' },
+  };
+  cub(answers);
+  const res = await worker.fetch(new Request('https://w/mine/history?tz=120', { headers: lampa }), e);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('Cache-Control'), 'no-store');
+  const { items } = await res.json();
+  assert.deepEqual(items.map(([t, c, what, left, lampaPlayed, hashes]) => [new Date(t).toISOString().slice(0, 16), c[2], what,
+    left, lampaPlayed, hashes.length]), [
+    ['2026-11-02T20:00', 'Dark Matter', 'S2 E2', 2500, 0, 1],
+    ['2026-11-02T18:00', 'Top Gun: Maverick', '', -1, 0, 0], // CUB says played again, no point saved: nothing known
+    ['2026-11-01T19:25', 'Top Gun: Maverick', '', 0, 0, 1],
+    ['2026-10-31T16:49', 'Dark Matter', 'S2 E1', 0, 1, 1],
+    ['2026-10-27T22:30', 'Dark Matter', 'S1 E7', 0, 1, 1],
+    ['2026-10-27T20:00', 'Dark Matter', 'S1 E5 and E6', 0, 1, 2],
+    ['2025-06-01T12:00', 'Никогда', '', -1, 0, 0], // no point: CUB's time, nothing known
+    ['2025-05-01T12:00', 'Звёздные войны', '', 0, 1, 1], // no dated point: CUB's time
+  ]);
+  assert.deepEqual(items[0][5], [lampaHashOf('22Dark Matter')]);
+  cub(answers);
+  const utc = (await (await worker.fetch(new Request('https://w/mine/history', { headers: lampa }), e)).json()).items;
+  assert.deepEqual(utc.filter(([, c]) => c[0] === 196322).map(([, , what]) => what), ['S2 E2', 'S2 E1', 'S1 E5 to E7'],
+    'UTC: the 27th\'s three episodes on one day');
+  cub({ 'users/get': { user: { id: 9 } } });
+  assert.equal((await worker.fetch(new Request('https://w/mine/history', { headers: lampa }), e)).status, 401);
+});
+
+test('history: Mark unwatched puts its points back to the start, stamped now; Remove takes it out of CUB\'s history', async () => {
+  const e = mineEnv();
+  e.DB.raw.prepare('INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, 2900, 3000, 97, 5)').run('123');
+  e.DB.raw.prepare('INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, 2900, 3000, 97, 5)').run('456');
+  const post = (path, body, h = lampa) => worker.fetch(new Request('https://w/mine/' + path,
+    { method: 'POST', headers: h, body: body && JSON.stringify(body) }), e);
+  const answers = {
+    'users/get': { user: { id: 42 } },
+    'bookmarks/dump': cubDump([bm(7, 'history', 'tv', 1, { id: 1399, name: 'Игра престолов' }),
+      bm(8, 'book', 'tv', 2, { id: 1399, name: 'Игра престолов' }), bm(9, 'history', 'tv', 3, { id: 1399, name: 'Игра престолов' })]),
+    'bookmarks/remove': { secuses: true },
+    'tv/1399': { id: 1399, name: 'Game of Thrones', genres: [] },
+  };
+  cub(answers);
+  const before = Date.now();
+  assert.equal((await post('unwatch', { hashes: ['123'] })).status, 204);
+  const rows = e.DB.raw.prepare('SELECT hash, time, percent, updated FROM timeline ORDER BY hash').all();
+  assert.deepEqual(rows.map((r) => [r.hash, r.time, r.percent]), [['123', 0, 0], ['456', 2900, 97]]);
+  assert.ok(rows[0].updated >= before, 'stamped now: Lampa takes it');
+  cub(answers);
+  assert.equal((await post('unwatch', { hashes: ['1; DROP'] })).status, 400);
+  assert.equal((await post('unwatch', { hashes: [] })).status, 400);
+  cub({ 'users/get': { user: { id: 9 } } });
+  assert.equal((await post('unwatch', { hashes: ['456'] })).status, 401);
+  cub({ ...answers, 'tv/1399': undefined }); // TMDB down: a removal doesn't need it
+  assert.equal((await post('unhistory/tv/1399')).status, 204);
+  assert.ok(!asked.some((u) => u.includes('themoviedb')), 'TMDB not asked');
+  const removed = asked.filter((u) => u.includes('bookmarks/remove')).map((u) => new URLSearchParams(u.split(' ')[1]));
+  assert.deepEqual(removed.map((p) => [p.get('type'), p.get('id'), JSON.parse(p.get('data')).name]),
+    [['history', '7', 'Игра престолов'], ['history', '9', 'Игра престолов']], 'not the bookmark; the card CUB keeps');
+});
+
 test('mine/<mark>: kept in D1 per account and profile (CUB\'s marks need Premium); one at a time; none removes it', async () => {
   const e = mineEnv();
   const answers = {
