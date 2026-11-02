@@ -133,7 +133,7 @@ def recap(o):
         return None
     # the language the viewer listens in (lampa-native's audio setting): "Russian"; English recaps keep their old keys
     lang = str(o.get('language') or 'English')
-    if not re.fullmatch(r'[A-Za-z]{2,20}', lang):
+    if not re.fullmatch(r'[^\W\d_]+( [^\W\d_]+){0,2}', lang) or len(lang) > 40:  # letters: "Norwegian Bokmål"
         lang = 'English'
     key = str(o.get('key', ''))[:80] + ('' if lang == 'English' else ' ' + lang)
     with recap_lock:
@@ -149,7 +149,8 @@ def recap(o):
                        timeout=RECAP_S, cwd='/tmp')
     out = json.loads(r.stdout or '{}')
     text = (out.get('result') or '').strip()
-    if out.get('is_error') or len(text) < 300:  # 120-180 words; shorter is Claude saying it can't
+    log('recap model:', ', '.join(out.get('modelUsage') or {}) or '?')
+    if out.get('is_error') or len(text) < 120:  # 120-180 words (Chinese: ~200 characters); shorter: Claude can't
         log('recap:', text[:200] or r.stderr[:200])
         return None
     with recap_lock:
