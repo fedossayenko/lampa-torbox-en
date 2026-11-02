@@ -982,12 +982,13 @@ test('mine: a graded film leaves My list, Finish later and Continue browsing; a 
   ]),
   'tv/9': { ...show(9, 'Good show'), status: 'Returning Series', last_episode_to_air: { season_number: 1, episode_number: 2 } },
   'tv/10': { ...show(10, 'Not my show'), status: 'Returning Series', last_episode_to_air: { season_number: 1, episode_number: 2 } } });
-  const { rows, left } = await (await getMine(e)).json();
+  const { rows, left, percent } = await (await getMine(e)).json();
   const row = (title) => (rows.find(([t]) => t === title) || [, []])[1].map((c) => c[0]);
   assert.deepEqual(row('My list'), [9]);
   assert.deepEqual(row('Finish later'), [5]);
   assert.deepEqual(row('Continue browsing'), [4]);
   assert.deepEqual(left, { movie_4: 4000, movie_5: 6000 }, 'graded: none; Finish later: its time too');
+  assert.deepEqual(percent, { movie_4: 43, movie_5: 14 }, 'how far in, for a Continue tile\'s bar');
 });
 
 test('cron at 04 UTC: New in 4K from CUB\'s 4K list, well-known ones, each kept from its first day; /mine shows the unseen', async () => {
@@ -1059,7 +1060,7 @@ test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502;
   cub({ 'users/get': { user: { id: 42 } } });
   assert.equal((await getMine(e)).status, 502);
   cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]) });
-  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {}, new: {}, mylist: [], left: {},
+  assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {}, new: {}, mylist: [], left: {}, percent: {},
     seen: [] });
 });
 
