@@ -383,6 +383,18 @@ async function filmCard(request, env, type, id) {
 const NOT_A_ROLE = /^(self|himself|herself|themselves)\b|archive footage/i;
 const TALK = [10763, 10764, 10767]; // TMDB's News, Reality, Talk
 
+// GET /season/<tv id>/<n> -> lampa-native's episode rows (user's design 2026-11-02): {episodes: [[episode, name,
+// runtime minutes, overview, still_path]]}, TMDB's en-US, kept a day at the edge.
+async function seasonPage(request, env, id, n) {
+  const res = await tmdb(env, `tv/${id}/season/${n}`);
+  if (!res.ok) return corsError(request, `TMDB ${res.status}`, res.status === 404 ? 404 : 502);
+  const episodes = ((await res.json()).episodes || []).map((e) => [e.episode_number, e.name || '', e.runtime || 0,
+    e.overview || '', e.still_path || '']);
+  return new Response(JSON.stringify({ episodes }), {
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'max-age=86400', ...corsHeaders(request) },
+  });
+}
+
 async function personPage(request, env, id) {
   const res = await tmdb(env, `person/${id}`, '&append_to_response=combined_credits');
   if (!res.ok) return corsError(request, `TMDB ${res.status}`, res.status === 404 ? 404 : 502);
@@ -1388,10 +1400,11 @@ async function mine(request, env) {
     const p = partly.get(k);
     next[`tv_${id}`] = `S${n[0]} E${n[1]} · ${p && p.time >= 60 && p.duration > p.time ? leftText(p.duration - p.time) : 'up next'}`;
   }
-  // Coming up (user's design 2026-11-02), [date, card, what, state] by date, "" (later, or no date) last: the next
-  // episode of each series you follow for four weeks: a new one aired (out with RU/UA audio, state "out", or only in
-  // English so far, "waiting": dated today), or the next to air once you're caught up ("airs"); and My list's films
-  // not out yet ("film": in four weeks, else "").
+  // Coming up (user's design 2026-11-02), [date, card, what, state, [season, episode] (a series')] by date, ""
+  // (later, or no date) last: the next episode of each series you follow for four weeks: a new one aired (out with
+  // RU/UA audio, state "out", or only in English so far, "waiting": dated today), or the next to air once you're caught
+  // up ("airs"); a new season's start wherever you are in it ("airs", user 2026-11-02); and My list's films not out
+  // yet ("film": in four weeks, else "").
   const today = new Date().toISOString().slice(0, 10);
   const until = new Date(Date.now() + 28 * 86400e3).toISOString().slice(0, 10);
   // "S6 E3 · next after your E2", "Season 4 starts · you finished season 3"
@@ -1399,12 +1412,25 @@ async function mine(request, env) {
     : `S${n} E${e}${how} · next after your E${w[1]}`);
   const coming = newOnes.map((x) => [today, JSON.parse(info.get(Number(x.h.card.id)).card), what(x.next,
     places.get(Number(x.h.card.id)).w, out.has(x.key) ? ' · out with RU/UA audio' : ' · out in English'),
-  out.has(x.key) ? 'out' : 'waiting']);
+  out.has(x.key) ? 'out' : 'waiting', x.next]);
   for (const h of followed) {
     const s = info.get(Number(h.card.id));
     const at = s && places.get(s.id);
     if (!at?.w || at.w[0] !== at.ls || at.w[1] !== at.le || !s.next_air || s.next_air < today || s.next_air > until) continue;
-    coming.push([s.next_air, JSON.parse(s.card), what(after(at.seasons, at.w), at.w, ''), 'airs']); // caught up
+    const n = after(at.seasons, at.w);
+    coming.push([s.next_air, JSON.parse(s.card), what(n, at.w, ''), 'airs', n]); // caught up
+  }
+  // a season starting in four weeks, of a series in your history or My list, wherever you are in it
+  const shown = new Set(coming.map(([, c]) => c[0]));
+  for (const h of [...followed, ...mylist.filter((x) => x.type === 'tv')]) {
+    const s = info.get(Number(h.card.id));
+    const start = s && !shown.has(s.id) && JSON.parse(s.seasons || '[]').find(([, , d]) => d >= today && d <= until);
+    if (!start) continue;
+    shown.add(s.id);
+    const at = places.get(s.id);
+    const on = at?.w && after(at.seasons, at.w);
+    const how = !on ? '' : on[0] === start[0] ? ` · you finished season ${at.w[0]}` : ` · you're on S${on[0]} E${on[1]}`;
+    coming.push([start[2], JSON.parse(s.card), `Season ${start[0]} starts${how}`, 'airs', [start[0], 1]]);
   }
   for (const h of mylist) {
     const date = h.type === 'movie' ? h.card.release_date || '' : today;
@@ -1604,6 +1630,10 @@ export default {
     const film = new URL(request.url).pathname.match(/^\/card\/(movie|tv)\/(\d+)$/);
     if (film && request.method === 'GET') {
       return edgeCached(request, ctx, () => filmCard(request, env, film[1], film[2]));
+    }
+    const season = new URL(request.url).pathname.match(/^\/season\/(\d+)\/(\d+)$/);
+    if (season && request.method === 'GET') {
+      return edgeCached(request, ctx, () => seasonPage(request, env, season[1], season[2]));
     }
     const actor = new URL(request.url).pathname.match(/^\/person\/(\d+)$/);
     if (actor && request.method === 'GET') return edgeCached(request, ctx, () => personPage(request, env, actor[1]));
