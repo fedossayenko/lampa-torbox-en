@@ -291,10 +291,11 @@ async function home(request, env) {
 // GET /card/movie/<tmdb id> or /card/tv/<tmdb id> -> lampa-native's film page, ready to draw (native.test.js):
 // {name, original, line, overview, scores: [[label, text, 0-100]], seasons: [[label, text, 0-100]], imdb,
 //  episodes: [[season, count]], people, cast: [[name, character, profile_path]], collection, parts: [Home card], trailer,
-//  runtime}
+//  runtime, similar: [Home card]}
 // cast: the first 12 with a photo. parts: the other films of its collection (TMDB, one more call), oldest first;
 // a film not out yet without a poster is left out. trailer: its YouTube video ("" none). runtime: a film's minutes
-// (0 unknown, a series): the page's "ends at 23:41".
+// (0 unknown, a series): the page's "ends at 23:41". similar: More like this, TMDB's recommendations of it (the same
+// call: appended), out already, with a poster, 50+ votes; at most 14.
 // The verdict comes first in scores: the same weighted average as ratings-patch.js (keep the two in step).
 const NORM = { tomatoes: 1, metacritic: 1, rogerebert: 25, imdb: 10, letterboxd: 20, kp: 10, trakt: 1, tmdb: 1, metacriticuser: 10 };
 const WEIGHTS = { tomatoes: 4, metacritic: 3, imdb: 3, kp: 2, rogerebert: 1, trakt: 1, tmdb: 1, metacriticuser: 1, letterboxd: 0.5 };
@@ -305,7 +306,7 @@ const SHOW = [['imdb', 'IMDb', (v) => v.toFixed(1)], ['tomatoes', 'RT', (v) => v
 async function filmCard(request, env, type, id) {
   const mdbType = type === 'tv' ? 'show' : 'movie';
   const [res, r] = await Promise.all([
-    tmdb(env, `${type}/${id}`, '&append_to_response=credits,external_ids,videos'),
+    tmdb(env, `${type}/${id}`, '&append_to_response=credits,external_ids,videos,recommendations'),
     fetch(`https://api.mdblist.com/tmdb/${mdbType}/${id}?apikey=${env.MDBLIST_API_KEY}`)
       .then((x) => (x.ok ? x.json() : {})).then(ratingsOf).catch(() => ({})), // no scores beats no page
   ]);
@@ -364,6 +365,9 @@ async function filmCard(request, env, type, id) {
     parts,
     trailer,
     runtime: type === 'movie' && m.runtime > 0 ? m.runtime : 0,
+    similar: (m.recommendations?.results || []).filter((p) => p.poster_path && (p.vote_count || 0) >= 50
+      && (p.release_date || p.first_air_date || '9') <= new Date().toISOString().slice(0, 10))
+      .slice(0, 14).map((p) => cardOf(p, p.media_type || type)),
   }), {
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
