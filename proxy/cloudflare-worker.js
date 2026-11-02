@@ -343,8 +343,12 @@ async function filmCard(request, env, type, id) {
   const trailer = (m.videos?.results || []).filter((v) => v.site === 'YouTube' && v.key && kind(v) < 9)
     .sort((a, b) => kind(a) - kind(b) || Date.parse(b.published_at) - Date.parse(a.published_at))[0]?.key || '';
 
-  const photos = (m.credits?.cast || []).filter((p) => p.profile_path).slice(0, 12)
-    .map((p) => [p.name || '', p.character || '', p.profile_path, p.id || 0]); // id: OK opens /person
+  // the director first (user's design 2026-11-02: follow a person, a director too), then the cast (a director who also
+  // acts once, as the director)
+  const directors = type === 'movie' ? (m.credits?.crew || []).filter((p) => p.job === 'Director') : [];
+  const photos = [...directors.map((p) => ({ ...p, character: 'Director' })),
+    ...(m.credits?.cast || []).filter((p) => !directors.some((d) => d.id === p.id))].filter((p) => p.profile_path)
+    .slice(0, 12).map((p) => [p.name || '', p.character || '', p.profile_path, p.id || 0]); // id: OK opens /person
   return new Response(JSON.stringify({
     name,
     original: original === name ? '' : original,
@@ -410,31 +414,120 @@ async function seasonPage(request, env, id, n) {
   });
 }
 
+// A person's credits (TMDB's person/<id> with combined_credits): their roles, and for one known for directing (TMDB's
+// known_for_department: Denis Villeneuve) what they directed first; not themselves or archive footage, no talk shows,
+// not a series they are in once. Each title once (directed, when both).
+function creditsOf(p) {
+  const directed = p.known_for_department === 'Directing' ? (p.combined_credits?.crew || []).filter((m) => m.job === 'Director') : [];
+  return [...new Map([...directed, ...(p.combined_credits?.cast || []).filter((m) => !NOT_A_ROLE.test(m.character || ''))]
+    .filter((m) => !(m.genre_ids || []).some((g) => TALK.includes(g)) && !(m.media_type === 'tv' && m.episode_count < 2))
+    .reverse().map((m) => [m.media_type + m.id, { ...m, directs: m.job === 'Director' }])).values()].reverse();
+}
+const creditDate = (m) => m.release_date || m.first_air_date || '';
+// Their films dated after today, soonest first, [date, card, how]: directed ("directs"), or a lead role (TMDB's cast
+// order 0-3, "stars"): what Coming up shows for a person you follow. Undated ones (actors' lists are full of projects
+// that never come) wait for a date.
+function upcomingOf(p, today) {
+  return creditsOf(p).filter((m) => m.media_type === 'movie' && creditDate(m) > today && (m.directs || m.order <= 3))
+    .sort((a, b) => creditDate(a).localeCompare(creditDate(b)))
+    .map((m) => [creditDate(m), cardOf({ ...m, poster_path: m.poster_path || '' }, 'movie'), m.directs ? 'directs' : 'stars']);
+}
+
 async function personPage(request, env, id) {
   const res = await tmdb(env, `person/${id}`, '&append_to_response=combined_credits');
   if (!res.ok) return corsError(request, `TMDB ${res.status}`, res.status === 404 ? 404 : 502);
   const p = await res.json();
   const today = new Date().toISOString().slice(0, 10);
-  const date = (m) => m.release_date || m.first_air_date || '9999';
-  const roles = [...new Map((p.combined_credits?.cast || [])
-    .filter((m) => m.poster_path && date(m) <= today && !NOT_A_ROLE.test(m.character || '')
-      && !(m.genre_ids || []).some((g) => TALK.includes(g)) && !(m.media_type === 'tv' && m.episode_count < 2))
-    .map((m) => [m.media_type + m.id, m])).values()];
+  const all = creditsOf(p).filter((m) => m.poster_path);
+  const roles = all.filter((m) => creditDate(m) && creditDate(m) <= today);
+  const date = (m) => creditDate(m) || '9999';
   const newest = (type) => roles.filter((m) => m.media_type === type)
     .sort((a, b) => date(b).localeCompare(date(a))).map((m) => cardOf(m, type));
   const weighted = (m) => (m.vote_count * m.vote_average + 500 * 6.5) / (m.vote_count + 500);
   const best = roles.filter((m) => m.vote_count > 0).sort((a, b) => weighted(b) - weighted(a)).slice(0, 20)
     .map((m) => cardOf(m, m.media_type));
+  // Coming (user's design 2026-11-02, "Coming, then best rated"): dated after today, soonest first
+  const coming = all.filter((m) => creditDate(m) > today).sort((a, b) => creditDate(a).localeCompare(creditDate(b)))
+    .map((m) => cardOf(m, m.media_type));
   const born = p.birthday || '';
   const age = born && Number(today.slice(0, 4)) - Number(born.slice(0, 4)) - (today.slice(5) < born.slice(5) ? 1 : 0);
   const life = p.deathday ? `${born.slice(0, 4)}–${p.deathday.slice(0, 4)}` : born && `Born ${born.slice(0, 4)} (${age})`;
   return new Response(JSON.stringify({
-    line: [life, p.place_of_birth].filter(Boolean).join(' · '),
+    line: [p.known_for_department === 'Directing' && 'Director', life, p.place_of_birth].filter(Boolean).join(' · '),
     about: p.biography || '',
-    rows: [['Best rated', best], ['Films', newest('movie')], ['Series', newest('tv')]].filter(([, cards]) => cards.length),
+    rows: [['Coming', coming], ['Best rated', best], ['Films', newest('movie')], ['Series', newest('tv')]]
+      .filter(([, cards]) => cards.length),
   }), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'max-age=86400', ...corsHeaders(request) },
   });
+}
+
+// POST /mine/follow/<person id> or /mine/unfollow/<person id> (the CUB sign-in) -> 204 (user's design 2026-11-02:
+// follow a person). Following asks TMDB at once, so their coming films show in Coming up now; the hourly cron asks
+// again a day later (refreshFollows).
+async function follow(request, env, on, person) {
+  const who = await cubUser(request, env);
+  if (!who) return corsError(request, 'CUB sign-in required.', 401);
+  if (!env.DB) return corsError(request, 'No database.', 502);
+  if (!on) {
+    await env.DB.prepare('DELETE FROM follows WHERE who = ? AND person = ?').bind(who, Number(person)).run();
+    return new Response(null, { status: 204, headers: corsHeaders(request) });
+  }
+  const res = await tmdb(env, `person/${person}`, '&append_to_response=combined_credits');
+  if (!res.ok) return corsError(request, `TMDB ${res.status}`, res.status === 404 ? 404 : 502);
+  const p = await res.json();
+  const coming = upcomingOf(p, new Date().toISOString().slice(0, 10));
+  // followed already (another device): kept as it is, what was seen too
+  await env.DB.prepare(`INSERT INTO follows (who, person, name, coming, known, t) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+      ON CONFLICT (who, person) DO NOTHING`)
+    .bind(who, Number(person), p.name || '', JSON.stringify(coming), JSON.stringify(coming.map(([, c]) => c[0])), Date.now())
+    .run();
+  return new Response(null, { status: 204, headers: corsHeaders(request) });
+}
+
+// The hourly cron: each person followed asked of TMDB again once a day, FOLLOWS_FETCH a run (subrequests: For you takes
+// 25 of the 50; not in the 04 UTC run, New in 4K's).
+const FOLLOWS_FETCH = 10;
+// "2026-12-18" → "18 Dec 2026" (fixed names: ICU's en-GB says "Sept" in some versions)
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const shortDate = (d) => `${Number(d.slice(8, 10))} ${MONTHS[Number(d.slice(5, 7)) - 1]} ${d.slice(0, 4)}`;
+async function refreshFollows(env, now) {
+  // the longest waiting first; each asked is stamped, so one TMDB keeps failing (gone, merged) waits a day too
+  const due = (await env.DB.prepare('SELECT person FROM follows WHERE t < ? GROUP BY person ORDER BY MIN(t) LIMIT ?')
+    .bind(now - 86400e3, FOLLOWS_FETCH).all()).results.map((r) => r.person);
+  if (!due.length) return;
+  await env.DB.prepare('UPDATE follows SET t = ?1 WHERE person IN (SELECT value FROM json_each(?2))')
+    .bind(now, JSON.stringify(due)).run();
+  const today = new Date(now).toISOString().slice(0, 10);
+  const got = new Map((await Promise.all(due.map((id) => tmdb(env, `person/${id}`, '&append_to_response=combined_credits')
+    .then((res) => (res.ok ? res.json() : null)).then((p) => p && [id, p]).catch(() => null)))).filter(Boolean));
+  // by the id asked (TMDB may answer a merged person's own); 4 D1 queries in all (the free plan: 50 a run)
+  const rows = (await env.DB.prepare('SELECT who, person, known FROM follows WHERE person IN (SELECT value FROM json_each(?))')
+    .bind(JSON.stringify([...got.keys()])).all()).results;
+  const told = [], updates = [];
+  for (const r of rows) {
+    const p = got.get(r.person);
+    const coming = upcomingOf(p, today);
+    // a film dated that wasn't seen before is news (What's new) for each account following them, once; known keeps
+    // the ones before too (a film whose date goes and comes back isn't news twice)
+    const known = new Set(JSON.parse(r.known || '[]'));
+    for (const [date, c] of coming.filter(([, x]) => !known.has(x[0]))) {
+      told.push({ who: r.who, key: `film:${c[0]}`, t: now, card: JSON.stringify(c), head: p.name || '',
+        line: `New film: ${c[2]} · ${shortDate(date)}` });
+      known.add(c[0]);
+    }
+    updates.push({ who: r.who, person: r.person, name: p.name || '', coming: JSON.stringify(coming), known: JSON.stringify([...known]) });
+  }
+  if (told.length) {
+    await env.DB.prepare(`INSERT INTO news (who, key, t, card, head, line) SELECT value->>'who', value->>'key', value->>'t',
+        value->>'card', value->>'head', value->>'line' FROM json_each(?) WHERE true ON CONFLICT (who, key) DO NOTHING`)
+      .bind(JSON.stringify(told)).run();
+  }
+  if (updates.length) {
+    await env.DB.prepare(`UPDATE follows SET name = u.value->>'name', coming = u.value->>'coming', known = u.value->>'known'
+        FROM json_each(?) u WHERE follows.who = u.value->>'who' AND follows.person = u.value->>'person'`)
+      .bind(JSON.stringify(updates)).run();
+  }
 }
 
 // GET /genre/<slug> -> lampa-native's genre page (Search before typing: OK on a genre), as /person's:
@@ -1180,11 +1273,11 @@ function langNames(codes) {
 // Which of those new episodes are out in the asked audio languages (a dub comes days after the air date; none asked:
 // any release): Torrentio's flags, asked at most every FRESH_EVERY per episode until it is (fresh.sql, keyed per
 // language set; RU,UA's keys are the ones from before the setting), up to FRESH_MAX a request; its failures are
-// asked again next time. [{key, imdb, next}] in, the keys out.
+// asked again next time. [{key, imdb, next}] in, the keys out → when a release in those languages was first seen (ms).
 const FRESH_EVERY = 3 * 3600e3;
 const FRESH_MAX = 5;
 async function freshOut(env, list, langs = ['RU', 'UA']) {
-  if (!env.DB || !list.length) return new Set();
+  if (!env.DB || !list.length) return new Map();
   const now = Date.now();
   const tag = langs.join(',') === 'RU,UA' ? '' : `|${langs.join(',')}`;
   const rows = new Map((await env.DB.prepare('SELECT key, out, t FROM fresh WHERE key IN (SELECT value FROM json_each(?))')
@@ -1203,7 +1296,7 @@ async function freshOut(env, list, langs = ['RU', 'UA']) {
       .bind(JSON.stringify(asked)).run().catch(() => {}); // asked again next time
   }
   for (const a of asked) rows.set(a.key, a);
-  return new Set(list.filter((x) => row(x)?.out).map((x) => x.key));
+  return new Map(list.filter((x) => row(x)?.out).map((x) => [x.key, Number(row(x).out)]));
 }
 
 // New in 4K (user 2026-10-31): CUB's own list of the latest 4K releases (Lampa's "In high quality" row). Its 4K
@@ -1334,9 +1427,12 @@ async function mine(request, env) {
   const who = await cubUser(request, env);
   if (!who) return corsError(request, 'CUB sign-in required.', 401);
   const db = (sql, ...args) => (env.DB ? env.DB.prepare(sql).bind(...args).all().then((r) => r.results).catch(() => []) : []);
-  const [dump, ours, graded, picks, uhd] = await Promise.all([cubApi(request, 'bookmarks/dump'),
+  const [dump, ours, graded, picks, uhd, follows, told] = await Promise.all([cubApi(request, 'bookmarks/dump'),
     db('SELECT card, mark FROM marks WHERE who = ?', who), env.GRADES ? env.GRADES.get(who, 'json').catch(() => null) : null,
-    db('SELECT cards FROM foryou WHERE who = ?', who), db('SELECT type, id, card FROM uhd WHERE card IS NOT NULL ORDER BY t DESC, pos LIMIT 100')]);
+    db('SELECT cards FROM foryou WHERE who = ?', who), db('SELECT type, id, card FROM uhd WHERE card IS NOT NULL ORDER BY t DESC, pos LIMIT 100'),
+    db('SELECT person, name, coming FROM follows WHERE who = ?', who),
+    db('SELECT t, card, head, line FROM news WHERE who = ? AND t > ? ORDER BY t DESC LIMIT ?', who, Date.now() - NEWS_DAYS * 86400e3,
+      NEWS_MAX)]);
   if (!dump || !Array.isArray(dump.bookmarks)) return corsError(request, 'CUB unavailable.', 502);
   const marks = {};
   for (const b of dump.bookmarks) if (MARKS.includes(b.type) && /^(movie|tv)$/.test(b.card_type)) marks[`${b.card_type}_${b.card_id}`] = b.type;
@@ -1490,6 +1586,26 @@ async function mine(request, env) {
     const card = date > today && !finished(h) && mine(h) && cardFor(h);
     if (card) coming.push([date <= until ? date : '', card, "From My list · in cinemas first, here once it's out digitally", 'film']);
   }
+  // the films of the people you follow (user's design 2026-11-02), as My list's: each once, not one you graded or marked
+  const films = new Set(coming.filter(([, c]) => c[1] === 'movie').map(([, c]) => c[0]));
+  for (const f of follows) {
+    for (const [date, card, how] of JSON.parse(f.coming || '[]')) {
+      if (date <= today || films.has(card[0]) || !unseen('movie', card[0])) continue;
+      films.add(card[0]);
+      coming.push([date <= until ? date : '', card, `${how === 'directs' ? `${f.name}'s new film` : `With ${f.name}`} · in `
+        + "cinemas first, here once it's out digitally", 'film']);
+    }
+  }
+  // What's new (user's design 2026-11-02, canvas board Bell), newest first, [t, card, head, line]: the new episodes out
+  // in your audio languages (when a release was first seen) and the news kept in D1 (refreshFollows: films the people
+  // you follow announced), NEWS_DAYS back; the app keeps when you last looked
+  const outLine = langs.length ? `Out in ${langNames(langs)}` : 'Out';
+  const since = Date.now() - NEWS_DAYS * 86400e3;
+  const news = [...newOnes.filter((x) => out.get(x.key) > since).map((x) => {
+    const c = JSON.parse(info.get(Number(x.h.card.id)).card);
+    return [out.get(x.key), c, `${c[2]} · S${x.next[0]} E${x.next[1]}`, outLine];
+  }),
+  ...told.map((r) => [r.t, JSON.parse(r.card), r.head, r.line])].sort((a, b) => b[0] - a[0]).slice(0, NEWS_MAX);
   const rank = ['out', 'waiting', 'airs', 'film']; // a day's: out first
   coming.sort((a, b) => (a[0] || '9').localeCompare(b[0] || '9') || rank.indexOf(a[3]) - rank.indexOf(b[3]));
   const rows = [];
@@ -1511,7 +1627,7 @@ async function mine(request, env) {
   const seen = all.filter((b) => b.card_type === 'movie').map((b) => [keyOf(b), bookmarkCard(b)])
     .filter(([, h]) => h && done.get(hash(h.card))?.percent >= 90).map(([k]) => k);
   return new Response(JSON.stringify({ rows, marks, grades, new: fresh, mylist: listed.map(keyOf), left, percent,
-    seen: [...new Set(seen)], next, coming }), {
+    seen: [...new Set(seen)], next, coming, follows: follows.map((f) => f.person), news }), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...corsHeaders(request) },
   });
 }
@@ -1529,15 +1645,20 @@ async function mine(request, env) {
 // Lampa's key (Lampa's own timeline does too).
 // Points under a minute (a release tried) are left out.
 // ponytail: a film played here and later in Lampa keeps the card, so it says "here"; a column per point if it matters
+const NEWS_DAYS = 30;
+const NEWS_MAX = 20;
 const HISTORY_MAX = 100;
 const HISTORY_TITLES = 150; // the newest: their JSON and episodes' keys are the CPU (~5 ms locally, as /mine)
 const TRIED_S = 60;
 const DATED = Date.UTC(2020, 0, 1); // Lampa's undated points say 1970
+// [[season, episode], ...] in order → "S1 E6", "S1 E6 and E7", "S1 E3 to E7" (one run), "S1 E1, E5 and S2 E1"
 function episodesText(eps) {
   if (!eps.length) return '';
-  const [first, last] = [eps[0], eps.at(-1)];
-  const lastText = last[0] === first[0] ? `E${last[1]}` : `S${last[0]} E${last[1]}`;
-  return eps.length === 1 ? `S${first[0]} E${first[1]}` : `S${first[0]} E${first[1]} ${eps.length === 2 ? 'and' : 'to'} ${lastText}`;
+  const name = ([s, e], i) => (i > 0 && s === eps[i - 1][0] ? `E${e}` : `S${s} E${e}`);
+  const run = eps.every(([s, e], i) => i === 0 || (s === eps[i - 1][0] && e === eps[i - 1][1] + 1));
+  if (eps.length > 2 && run) return `${name(eps[0], 0)} to E${eps.at(-1)[1]}`;
+  const names = eps.map(name);
+  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
 }
 async function historyPage(request, env) {
   const who = await cubUser(request, env);
@@ -1770,8 +1891,10 @@ export default {
     if (!env.DB) return undefined;
     if (event.cron === HOURLY_CRON) {
       const empty = !(await env.DB.prepare('SELECT 1 FROM uhd LIMIT 1').first()); // the first run fills it at once
-      return new Date(event.scheduledTime).getUTCHours() === 4 || empty ? refreshUhd(env, event.scheduledTime)
-        : env.GRADES && refreshForYou(env);
+      if (new Date(event.scheduledTime).getUTCHours() === 4 || empty) return refreshUhd(env, event.scheduledTime);
+      // follows beside For you (25 of the 50 subrequests), not beside New in 4K (up to 35); a failure stays theirs
+      return Promise.all([env.GRADES && refreshForYou(env),
+        refreshFollows(env, event.scheduledTime).catch((e) => console.log('follows', e))]);
     }
     return TITLE_CRONS[event.cron] ? refreshTitles(env, TITLE_CRONS[event.cron]) : undefined;
   },
@@ -1821,6 +1944,8 @@ export default {
     if (new URL(request.url).pathname === '/mine' && request.method === 'GET') return mine(request, env);
     if (new URL(request.url).pathname === '/mine/history' && request.method === 'GET') return historyPage(request, env);
     if (new URL(request.url).pathname === '/mine/unwatch' && request.method === 'POST') return unwatch(request, env);
+    const followed = new URL(request.url).pathname.match(/^\/mine\/(follow|unfollow)\/(\d{1,10})$/);
+    if (followed && request.method === 'POST') return follow(request, env, followed[1] === 'follow', followed[2]);
     const listed = new URL(request.url).pathname
       .match(/^\/mine\/(history|unhistory|book|unbook|viewed|scheduled|thrown|none)\/(movie|tv)\/(\d+)$/);
     if (listed && request.method === 'POST') return bookmark(request, env, listed[1], listed[2], listed[3]);
