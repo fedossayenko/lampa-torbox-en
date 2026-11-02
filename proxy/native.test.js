@@ -198,13 +198,15 @@ test('film page answers TMDB\'s 404 as 404 and other TMDB failures as 502', asyn
   assert.equal((await card('tv/1')).status, 502);
 });
 
-test('season: its episodes\' numbers, names, runtimes, overviews and stills', async () => {
+test('season: its episodes\' numbers, names, runtimes, overviews, stills and air dates', async () => {
   tmdbAnswers({ 'tv/1396/season/2': { episodes: [
-    { episode_number: 8, name: 'Better Call Saul', runtime: 47, overview: 'Badger is arrested.', still_path: '/s8.jpg' },
-    { episode_number: 9, name: 'Episode 9', runtime: null, overview: '', still_path: null }] } });
+    { episode_number: 8, name: 'Better Call Saul', runtime: 47, overview: 'Badger is arrested.', still_path: '/s8.jpg',
+      air_date: '2009-04-26' },
+    { episode_number: 9, name: 'Episode 9', runtime: null, overview: '', still_path: null, air_date: '2026-11-10' },
+    { episode_number: 10, name: 'Episode 10', runtime: null, overview: '', still_path: null, air_date: null }] } });
   const res = await worker.fetch(new Request('https://w/season/1396/2'), env);
-  assert.deepEqual((await res.json()).episodes, [[8, 'Better Call Saul', 47, 'Badger is arrested.', '/s8.jpg'],
-    [9, 'Episode 9', 0, '', '']]);
+  assert.deepEqual((await res.json()).episodes, [[8, 'Better Call Saul', 47, 'Badger is arrested.', '/s8.jpg', '2009-04-26'],
+    [9, 'Episode 9', 0, '', '', '2026-11-10'], [10, 'Episode 10', 0, '', '', '']]);
   assert.equal(res.headers.get('Cache-Control'), 'max-age=86400');
   assert.equal((await worker.fetch(new Request('https://w/season/1/1'), env)).status, 502, 'TMDB down');
 });

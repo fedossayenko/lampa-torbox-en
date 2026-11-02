@@ -388,8 +388,9 @@ const TALK = [10763, 10764, 10767]; // TMDB's News, Reality, Talk
 async function seasonPage(request, env, id, n) {
   const res = await tmdb(env, `tv/${id}/season/${n}`);
   if (!res.ok) return corsError(request, `TMDB ${res.status}`, res.status === 404 ? 404 : 502);
+  // air_date: lampa-native's "Airs Tuesday, 10 Nov" on an episode not out yet (TMDB names it "Episode 4" till then)
   const episodes = ((await res.json()).episodes || []).map((e) => [e.episode_number, e.name || '', e.runtime || 0,
-    e.overview || '', e.still_path || '']);
+    e.overview || '', e.still_path || '', e.air_date || '']);
   return new Response(JSON.stringify({ episodes }), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'max-age=86400', ...corsHeaders(request) },
   });
