@@ -388,13 +388,21 @@ const NOT_A_ROLE = /^(self|himself|herself|themselves)\b|archive footage/i;
 const TALK = [10763, 10764, 10767]; // TMDB's News, Reality, Talk
 
 // GET /season/<tv id>/<n> -> lampa-native's episode rows (user's design 2026-11-02): {episodes: [[episode, name,
-// runtime minutes, overview, still_path]]}, TMDB's en-US, kept a day at the edge.
+// runtime minutes, overview, still_path]]}, TMDB's en-US, kept a day at the edge. ?lang=RU (Story so far in the audio
+// language): that language's name and overview for each episode TMDB has the overview translated for, else en-US.
 async function seasonPage(request, env, id, n) {
-  const res = await tmdb(env, `tv/${id}/season/${n}`);
+  const code = new URL(request.url).searchParams.get('lang') || '';
+  const lang = /^[A-Z]{2}$/.test(code) && code !== 'EN' ? new Intl.Locale(`und-${code}`).maximize().language : 'en';
+  const [res, own] = await Promise.all([tmdb(env, `tv/${id}/season/${n}`),
+    lang === 'en' ? null : tmdb(env, `tv/${id}/season/${n}`, '', lang)]);
   if (!res.ok) return corsError(request, `TMDB ${res.status}`, res.status === 404 ? 404 : 502);
+  const told = new Map(own?.ok ? ((await own.json()).episodes || []).filter((e) => e.overview)
+    .map((e) => [e.episode_number, e]) : []);
   // air_date: lampa-native's "Airs Tuesday, 10 Nov" on an episode not out yet (TMDB names it "Episode 4" till then)
-  const episodes = ((await res.json()).episodes || []).map((e) => [e.episode_number, e.name || '', e.runtime || 0,
-    e.overview || '', e.still_path || '', e.air_date || '']);
+  const episodes = ((await res.json()).episodes || []).map((e) => {
+    const t = told.get(e.episode_number) || e;
+    return [e.episode_number, t.name || e.name || '', e.runtime || 0, t.overview || '', e.still_path || '', e.air_date || ''];
+  });
   return new Response(JSON.stringify({ episodes }), {
     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'max-age=86400', ...corsHeaders(request) },
   });
@@ -463,7 +471,7 @@ async function discover(request, env, slug) {
   const years = q.get('years') || '';
   const decade = /^(19[89]0|20[0-2]0)$/.test(years) ? Number(years) : 0;
   const lte = years === 'older' ? '1979-12-31' : decade ? [`${decade + 9}-12-31`, today].sort()[0] : today;
-  const [sort, votes] = SORTS[q.get('sort')] || SORTS.best;
+  const [sort, votes] = SORTS[Object.hasOwn(SORTS, q.get('sort')) ? q.get('sort') : 'best'];
   let query = `&include_adult=false&${typeof id === 'number' ? `with_genres=${id}` : id}&without_genres=`
     + `${(typeof id === 'number' ? TALK : [...TALK, 16]).join('|')}&${date}.lte=${lte}&sort_by=${sort.replace('DATE', date)}`
     + `&vote_count.gte=${votes}&page=${Math.min(500, Math.max(1, Number(q.get('page')) || 1))}`;
@@ -1379,7 +1387,9 @@ async function mine(request, env) {
   const watched = (h) => (h.type === 'movie' ? done.has(hash(h.card)) : done.has(lastKey(h)));
   const rate = recent.filter((h) => !(`${h.type}_${h.card.id}` in grades) && watched(h)).slice(0, 20);
   const places = new Map([...info].filter(([, s]) => s.last).map(([id, s]) => [id, place(s, done)]));
-  const newOnes = followed.map((h) => {
+  // Coming up and new episodes: not the series graded Not for me or marked Not interested (a My list one too)
+  const mine = (h) => !gradedOut(h) && marks[`${h.type}_${h.card.id}`] !== 'thrown';
+  const newOnes = followed.filter(mine).map((h) => {
     const s = info.get(Number(h.card.id));
     const next = s && s.imdb && places.has(s.id) ? nextNew(s, places.get(s.id), Date.now()) : null;
     return next && { h, next, imdb: s.imdb, key: `${h.card.id}/${next[0]}/${next[1]}` };
@@ -1416,8 +1426,9 @@ async function mine(request, env) {
   for (const h of continuing.filter((x) => x.type === 'tv')) {
     const s = info.get(Number(h.card.id));
     const at = places.get(Number(h.card.id));
-    if (!at?.w) continue;
-    const n = after(at.seasons, at.w);
+    if (!at) continue;
+    // nothing watched to 90 % yet: the first episode ("S1 E1 · 30m left")
+    const n = at.w ? after(at.seasons, at.w) : [at.seasons.find(([x]) => x > 0)?.[0] || 1, 1];
     if (n[0] < at.ls || (n[0] === at.ls && n[1] <= at.le)) nextOf.set(s.id, [n, episodeKey(n, s.original)]);
   }
   const partly = new Map(nextOf.size ? (await db('SELECT hash, time, duration FROM timeline WHERE percent < 90 AND hash '
@@ -1441,13 +1452,14 @@ async function mine(request, env) {
   // "S6 E3 · next after your E2", "Season 4 starts · you finished season 3"
   const what = ([n, e], w, how) => (e === 1 ? `Season ${n} starts${how} · you finished season ${w[0]}`
     : `S${n} E${e}${how} · next after your E${w[1]}`);
-  // "out in Russian or Ukrainian", "English only so far" (English asked too, or any language: "no release yet")
-  const waiting = !langs.length || langs.includes('EN') ? ' · no release yet' : ' · English only so far';
+  // "out in Russian or Ukrainian", "no Russian or Ukrainian yet" (English asked too, or any language: "no release
+  // yet"): not out as far as known (asked and none, or not asked yet), not a claim that an English one is
+  const waiting = !langs.length || langs.includes('EN') ? ' · no release yet' : ` · no ${langNames(langs)} yet`;
   const outIn = langs.length ? ` · out in ${langNames(langs)}` : ' · out';
   const coming = newOnes.map((x) => [today, JSON.parse(info.get(Number(x.h.card.id)).card), what(x.next,
     places.get(Number(x.h.card.id)).w, out.has(x.key) ? outIn : waiting),
   out.has(x.key) ? 'out' : 'waiting', x.next]);
-  for (const h of followed) {
+  for (const h of followed.filter(mine)) {
     const s = info.get(Number(h.card.id));
     const at = s && places.get(s.id);
     if (!at?.w || at.w[0] !== at.ls || at.w[1] !== at.le || !s.next_air || s.next_air < today || s.next_air > until) continue;
@@ -1456,7 +1468,7 @@ async function mine(request, env) {
   }
   // a season starting in four weeks, of a series in your history or My list, wherever you are in it
   const shown = new Set(coming.map(([, c]) => c[0]));
-  for (const h of [...followed, ...mylist.filter((x) => x.type === 'tv')]) {
+  for (const h of [...followed, ...mylist.filter((x) => x.type === 'tv')].filter(mine)) {
     const s = info.get(Number(h.card.id));
     const start = s && !shown.has(s.id) && JSON.parse(s.seasons || '[]').find(([, , d]) => d >= today && d <= until);
     if (!start) continue;

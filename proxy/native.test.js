@@ -219,6 +219,29 @@ test('season: its episodes\' numbers, names, runtimes, overviews, stills and air
   assert.equal((await worker.fetch(new Request('https://w/season/1/1'), env)).status, 502, 'TMDB down');
 });
 
+test('season in the audio language: its names and overviews where TMDB has the overview translated', async () => {
+  const byLanguage = {
+    en: [{ episode_number: 1, name: 'Pilot', overview: 'Walt is ill.' }, { episode_number: 2, name: 'Cat', overview: 'A body.' }],
+    ru: [{ episode_number: 1, name: 'Пилот', overview: 'Уолт болен.' }, { episode_number: 2, name: 'Эпизод 2', overview: '' }],
+  };
+  const fake = async (url) => {
+    asked.push(String(url));
+    const language = new URL(url).searchParams.get('language');
+    return new Response(JSON.stringify({ episodes: byLanguage[language === 'en-US' ? 'en' : language] }));
+  };
+  asked = [];
+  globalThis.fetch = fake;
+  const res = await worker.fetch(new Request('https://w/season/1396/1?lang=RU'), env);
+  assert.deepEqual((await res.json()).episodes.map((e) => [e[1], e[3]]),
+    [['Пилот', 'Уолт болен.'], ['Cat', 'A body.']]);
+  assert.equal(asked.length, 2);
+  for (const lang of ['EN', '', 'ru', 'R1']) {
+    asked = [];
+    await worker.fetch(new Request(`https://w/season/1396/1?lang=${lang}`), env);
+    assert.equal(asked.length, 1, `?lang=${lang}: en-US only`);
+  }
+});
+
 const person = async (id) => worker.fetch(new Request('https://w/person/' + id), env);
 const credit = (id, type, name, date, votes, average, more = {}) => ({
   id, media_type: type, [type === 'tv' ? 'name' : 'title']: name, [type === 'tv' ? 'first_air_date' : 'release_date']: date,
@@ -881,14 +904,14 @@ test('mine: a new episode out with RU/UA audio goes first in Continue browsing, 
   const first = await (await getMine(e)).json();
   assert.deepEqual(first.rows[0][1].map((c) => c[2]), ["Foundation", "Widow's Bay", 'Euphoria', 'Peaky Blinders',
     'Dark Matter'], 'Severance: watched to its last aired');
-  assert.deepEqual(first.new, { tv_93740: 'S3 E5' }, 'Dark Matter S2 E1: English only so far');
+  assert.deepEqual(first.new, { tv_93740: 'S3 E5' }, 'Dark Matter S2 E1: no Russian or Ukrainian yet');
   assert.deepEqual(first.left, { tv_93740: '1 ep', tv_196322: '1 ep', tv_60574: '9 ep', tv_85552: '1 ep',
     tv_270476: '9 ep' }, 'aired after the furthest watched (Peaky Blinders: S1 E4-6 and season 2); Severance: none');
   assert.deepEqual(first.next, { tv_93740: 'S3 E5 · up next', tv_270476: 'S1 E2 · up next', tv_85552: 'S3 E8 · up next',
     tv_60574: 'S1 E4 · up next', tv_196322: 'S2 E1 · up next' }, 'Continue browsing\'s tiles: the episode after the furthest watched');
   assert.deepEqual(first.coming.map(([date, c, what, state, episode]) => [date, c[2], what, state, episode]), [
     [day(0), 'Foundation', 'S3 E5 · out in Russian or Ukrainian · next after your E4', 'out', [3, 5]],
-    [day(0), 'Dark Matter', 'Season 2 starts · English only so far · you finished season 1', 'waiting', [2, 1]],
+    [day(0), 'Dark Matter', 'Season 2 starts · no Russian or Ukrainian yet · you finished season 1', 'waiting', [2, 1]],
     [day(-5), 'Severance', 'S1 E2 · next after your E1', 'airs', [1, 2]],
     [day(-10), 'Peaky Blinders', "Season 3 starts · you're on S1 E4", 'airs', [3, 1]],
     [day(-20), 'Pilot', 'Season 1 starts', 'airs', [1, 1]]],
@@ -911,13 +934,33 @@ test('mine: a new episode out with RU/UA audio goes first in Continue browsing, 
     .coming.slice(0, 2).map(([, c, what, state]) => [c[2], what, state]);
   assert.deepEqual(await lang('UA'), [
     ['Dark Matter', 'Season 2 starts · out in Ukrainian · you finished season 1', 'out'],
-    ['Foundation', 'S3 E5 · English only so far · next after your E4', 'waiting']], 'Foundation has 🇷🇺 / 🇬🇧 only');
+    ['Foundation', 'S3 E5 · no Ukrainian yet · next after your E4', 'waiting']], 'Foundation has 🇷🇺 / 🇬🇧 only');
   cub(answers);
   assert.deepEqual((await lang('EN')).map(([, what, state]) => [what.split(' · ')[1], state]),
     [['out in English', 'out'], ['out in English', 'out']], 'no flags = English');
   cub({ ...answers, '/stream/series/tt0804484:3:5.json': { streams: [] }, '/stream/series/tt12688584:2:1.json': { streams: [] } });
   assert.deepEqual((await lang('')).map(([, what, state]) => [what.split(' · ')[1], state]),
     [['no release yet', 'waiting'], ['no release yet', 'waiting']], 'any language, nothing out');
+  // graded Not for me (Foundation, out) or marked Not interested (Pilot, in My list): not in Coming up, no new label
+  e.GRADES = { get: async (k) => (k === '42:7' ? { tv_93740: { g: 'skip', t: 1 } } : null) };
+  cub({ ...answers, 'bookmarks/dump': cubDump([bm(1, 'history', 'tv', 1, { id: 93740, name: 'Основание' }),
+    bm(2, 'history', 'tv', 2, { id: 196322, name: 'Тёмная материя' }), bm(7, 'book', 'tv', 7, { id: 7, name: 'Пилот' }),
+    bm(8, 'thrown', 'tv', 8, { id: 7, name: 'Пилот' })]) });
+  const hidden = await (await getMine(e)).json();
+  assert.deepEqual(hidden.coming.map(([, c]) => c[2]), ['Dark Matter']);
+  assert.deepEqual(hidden.new, {});
+});
+
+test('mine: a series only started (no episode to 90 %): its first episode\'s line', async () => {
+  const e = mineEnv();
+  const ago = (days) => Date.now() - days * 86400e3;
+  e.DB.raw.prepare('INSERT INTO timeline (hash, time, duration, percent, updated) VALUES (?, 1200, 3000, 40, ?)')
+    .run(lampaHashOf('11Pluribus'), ago(1));
+  cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([bm(1, 'history', 'tv', 1, { id: 225171, name: 'Плюрибус' })]),
+    'tv/225171': { id: 225171, name: 'Pluribus', original_name: 'Pluribus', poster_path: '/p.jpg', external_ids: { imdb_id: 'tt9' },
+      seasons: [{ season_number: 0, episode_count: 1, air_date: '2025-01-01' }, { season_number: 1, episode_count: 9, air_date: '2025-11-07' }],
+      last_episode_to_air: { season_number: 1, episode_number: 3, air_date: '2025-11-14' } } });
+  assert.deepEqual((await (await getMine(e)).json()).next, { tv_225171: 'S1 E1 · 30m left' });
 });
 
 test('mine: a new season years later: any series in the history, past its newest 100; not a Not interested one', async () => {
@@ -1521,6 +1564,7 @@ test('discover: a genre with filters, one TMDB page; decade, country, score and 
     t.get('sort_by')], ['316362', '1979-12-31', null, null, 'first_air_date.desc']);
   assert.equal((await ask('x'.replace('x', '') + '?type=movie').then((r) => r.status)), 200);
   assert.equal((await worker.fetch(new Request('https://w/discover/kids'), env)).status, 404, 'no Kids genre for films');
+  for (const sort of ['constructor', '__proto__', 'toString']) assert.equal((await ask('?sort=' + sort)).status, 200, sort);
 });
 
 test('torbox: the account\'s plan and torrents, for the stick only; TorBox down → 502', async () => {

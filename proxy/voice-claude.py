@@ -19,6 +19,7 @@ Files in ~/lampa-intros: this, voice-prompt.json; ~/.lampa-intros: play_token (t
 import hmac
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -34,12 +35,13 @@ RECAPS = os.path.expanduser('~/.lampa-intros/recaps.json')
 RECAP_MODEL = 'opus'  # user 2026-11-02: Sonnet or Opus; written once per episode, so the better one
 RECAP_S = 140
 RECAP_PROMPT = (
-    'You write a "previously on" recap for a viewer coming back to a TV series after a break. English, 120-180 '
-    'words, plain prose in two or three short paragraphs: no title, no lists, no markdown. Cover the story up to and '
-    'including the episode named: the main characters, where each one stands, the open threads; the latest episodes '
-    'in the most detail. Never mention or hint at anything that happens after that episode, even if you know the '
-    'series well: when unsure whether something has happened by then, leave it out. Use the episode summaries given '
-    'and your own knowledge of the series up to that episode.')
+    'You write a "previously on" recap for a viewer coming back to a TV series after a break. Write it in {lang}, '
+    '120-180 words, plain prose in two or three short paragraphs: no title, no lists, no markdown. The viewer watches '
+    'the series in {lang}: give character and place names the way the {lang} dub or translation usually does. Cover '
+    'the story up to and including the episode named: the main characters, where each one stands, the open threads; '
+    'the latest episodes in the most detail. Never mention or hint at anything that happens after that episode, even '
+    'if you know the series well: when unsure whether something has happened by then, leave it out. Use the episode '
+    'summaries given (some may be in another language) and your own knowledge of the series up to that episode.')
 
 
 def log(*a):
@@ -125,8 +127,15 @@ def recaps():
 
 
 def recap(o):
-    """Claude's recap up to o['upto'], from the file when written before; None when Claude didn't answer."""
-    key = str(o.get('key', ''))[:80]
+    """Claude's recap up to o['upto'], from the file when written before; None when Claude didn't answer. Kept for
+    good, so only from a real key and TMDB's episodes (a TMDB hiccup sends none: Claude would write from memory)."""
+    if not re.fullmatch(r'(tv|movie)_\d+ S\d+E\d+', str(o.get('key', ''))) or not o.get('episodes'):
+        return None
+    # the language the viewer listens in (lampa-native's audio setting): "Russian"; English recaps keep their old keys
+    lang = str(o.get('language') or 'English')
+    if not re.fullmatch(r'[A-Za-z]{2,20}', lang):
+        lang = 'English'
+    key = str(o.get('key', ''))[:80] + ('' if lang == 'English' else ' ' + lang)
     with recap_lock:
         kept = recaps().get(key)
     if kept:
@@ -136,11 +145,11 @@ def recap(o):
            f'{str(o.get("upto", ""))[:40]}.\n\nEpisode summaries (TMDB), oldest first:\n' + '\n'.join(lines)[:20000])
     r = subprocess.run([CLAUDE, '-p', '--model', RECAP_MODEL, '--output-format', 'json', '--tools', '',
                         '--strict-mcp-config', '--setting-sources', '', '--no-session-persistence',
-                        '--system-prompt', RECAP_PROMPT], input=msg, capture_output=True, text=True,
+                        '--system-prompt', RECAP_PROMPT.format(lang=lang)], input=msg, capture_output=True, text=True,
                        timeout=RECAP_S, cwd='/tmp')
     out = json.loads(r.stdout or '{}')
     text = (out.get('result') or '').strip()
-    if out.get('is_error') or not text:
+    if out.get('is_error') or len(text) < 300:  # 120-180 words; shorter is Claude saying it can't
         log('recap:', text[:200] or r.stderr[:200])
         return None
     with recap_lock:
