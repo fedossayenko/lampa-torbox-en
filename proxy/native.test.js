@@ -235,6 +235,13 @@ test('season in the audio language: its names and overviews where TMDB has the o
   assert.deepEqual((await res.json()).episodes.map((e) => [e[1], e[3]]),
     [['Пилот', 'Уолт болен.'], ['Cat', 'A body.']]);
   assert.equal(asked.length, 2);
+  assert.equal(res.headers.get('Cache-Control'), 'max-age=86400');
+  globalThis.fetch = async (url) => (new URL(url).searchParams.get('language') === 'en-US' ? fake(url)
+    : Promise.reject(new Error('reset')));
+  const down = await worker.fetch(new Request('https://w/season/1396/1?lang=RU'), env);
+  assert.deepEqual((await down.json()).episodes.map((e) => e[1]), ['Pilot', 'Cat'], 'Russian call failed: English');
+  assert.equal(down.headers.get('Cache-Control'), 'max-age=300', 'and kept 5 minutes only');
+  globalThis.fetch = fake;
   for (const lang of ['EN', '', 'ru', 'R1']) {
     asked = [];
     await worker.fetch(new Request(`https://w/season/1396/1?lang=${lang}`), env);
@@ -961,6 +968,8 @@ test('mine: a series only started (no episode to 90 %): its first episode\'s lin
       seasons: [{ season_number: 0, episode_count: 1, air_date: '2025-01-01' }, { season_number: 1, episode_count: 9, air_date: '2025-11-07' }],
       last_episode_to_air: { season_number: 1, episode_number: 3, air_date: '2025-11-14' } } });
   assert.deepEqual((await (await getMine(e)).json()).next, { tv_225171: 'S1 E1 · 30m left' });
+  e.DB.raw.prepare('DELETE FROM timeline').run(); // opened, nothing played (or S3 E1 started, S1-S2 seen elsewhere)
+  assert.deepEqual((await (await getMine(e)).json()).next, {}, 'no line rather than a wrong S1 E1');
 });
 
 test('mine: a new season years later: any series in the history, past its newest 100; not a Not interested one', async () => {

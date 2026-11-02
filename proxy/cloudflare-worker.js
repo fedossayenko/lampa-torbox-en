@@ -393,8 +393,9 @@ const TALK = [10763, 10764, 10767]; // TMDB's News, Reality, Talk
 async function seasonPage(request, env, id, n) {
   const code = new URL(request.url).searchParams.get('lang') || '';
   const lang = /^[A-Z]{2}$/.test(code) && code !== 'EN' ? new Intl.Locale(`und-${code}`).maximize().language : 'en';
+  // the language's call failing must not take the en-US answer with it
   const [res, own] = await Promise.all([tmdb(env, `tv/${id}/season/${n}`),
-    lang === 'en' ? null : tmdb(env, `tv/${id}/season/${n}`, '', lang)]);
+    lang === 'en' ? null : tmdb(env, `tv/${id}/season/${n}`, '', lang).catch(() => null)]);
   if (!res.ok) return corsError(request, `TMDB ${res.status}`, res.status === 404 ? 404 : 502);
   const told = new Map(own?.ok ? ((await own.json()).episodes || []).filter((e) => e.overview)
     .map((e) => [e.episode_number, e]) : []);
@@ -403,8 +404,10 @@ async function seasonPage(request, env, id, n) {
     const t = told.get(e.episode_number) || e;
     return [e.episode_number, t.name || e.name || '', e.runtime || 0, t.overview || '', e.still_path || '', e.air_date || ''];
   });
+  // en-US only because the language's call failed: kept 5 minutes, not a day
+  const age = lang !== 'en' && !own?.ok ? 300 : 86400;
   return new Response(JSON.stringify({ episodes }), {
-    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'max-age=86400', ...corsHeaders(request) },
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': `max-age=${age}`, ...corsHeaders(request) },
   });
 }
 
@@ -1427,9 +1430,10 @@ async function mine(request, env) {
     const s = info.get(Number(h.card.id));
     const at = places.get(Number(h.card.id));
     if (!at) continue;
-    // nothing watched to 90 % yet: the first episode ("S1 E1 · 30m left")
+    // nothing watched to 90 % yet: the first episode, only while it is being watched ("S1 E1 · 30m left"; the
+    // seasons before may have been watched elsewhere)
     const n = at.w ? after(at.seasons, at.w) : [at.seasons.find(([x]) => x > 0)?.[0] || 1, 1];
-    if (n[0] < at.ls || (n[0] === at.ls && n[1] <= at.le)) nextOf.set(s.id, [n, episodeKey(n, s.original)]);
+    if (n[0] < at.ls || (n[0] === at.ls && n[1] <= at.le)) nextOf.set(s.id, [n, episodeKey(n, s.original), !at.w]);
   }
   const partly = new Map(nextOf.size ? (await db('SELECT hash, time, duration FROM timeline WHERE percent < 90 AND hash '
     + 'IN (SELECT value FROM json_each(?))', JSON.stringify([...nextOf.values()].map(([, k]) => k)))).map((p) => [p.hash, p]) : []);
@@ -1438,9 +1442,11 @@ async function mine(request, env) {
     return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m left` : `${m}m left`;
   };
   const next = {};
-  for (const [id, [n, k]] of nextOf) {
+  for (const [id, [n, k, first]] of nextOf) {
     const p = partly.get(k);
-    next[`tv_${id}`] = `S${n[0]} E${n[1]} · ${p && p.time >= 60 && p.duration > p.time ? leftText(p.duration - p.time) : 'up next'}`;
+    const going = p && p.time >= 60 && p.duration > p.time;
+    if (first && !going) continue;
+    next[`tv_${id}`] = `S${n[0]} E${n[1]} · ${going ? leftText(p.duration - p.time) : 'up next'}`;
   }
   // Coming up (user's design 2026-11-02), [date, card, what, state, [season, episode] (a series')] by date, ""
   // (later, or no date) last: the next episode of each series you follow for four weeks: a new one aired (out in your
@@ -1480,7 +1486,7 @@ async function mine(request, env) {
   }
   for (const h of mylist) {
     const date = h.type === 'movie' ? h.card.release_date || '' : today;
-    const card = date > today && !finished(h) && cardFor(h);
+    const card = date > today && !finished(h) && mine(h) && cardFor(h);
     if (card) coming.push([date <= until ? date : '', card, "From My list · in cinemas first, here once it's out digitally", 'film']);
   }
   const rank = ['out', 'waiting', 'airs', 'film']; // a day's: out first
