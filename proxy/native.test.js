@@ -293,11 +293,48 @@ test('actor page: best rated (weighted by votes), then films and series newest f
   assert.equal(p.about, 'An Irish actor.');
   const ids = Object.fromEntries(p.rows.map(([title, cards]) => [title, cards.map((c) => c[0])]));
   assert.deepEqual(ids, {
+    Coming: [8], // dated after today (an undated one waits for its date)
     'Best rated': [20, 1, 21, 3, 2],
     Films: [2, 3, 1],
     Series: [20, 24, 21],
   });
-  assert.deepEqual(p.rows[2][1][0], [20, 'tv', 'MobLand', '2025', '/p20.jpg', 81, '']); // Home cards
+  assert.deepEqual(p.rows[3][1][0], [20, 'tv', 'MobLand', '2025', '/p20.jpg', 81, '']); // Home cards
+});
+
+test('a director\'s page: the films directed (not produced), then roles, each once; "Director" first in the line; Coming', async () => {
+  const directed = (id, name, date, more = {}) => ({ ...credit(id, 'movie', name, date, 3000, 7.9, more), job: 'Director', character: undefined });
+  tmdbAnswers({
+    'person/137427': {
+      name: 'Denis Villeneuve', known_for_department: 'Directing', birthday: '1967-10-03', place_of_birth: 'Quebec, Canada',
+      biography: 'A Canadian filmmaker.',
+      combined_credits: {
+        cast: [credit(9, 'movie', 'A role', '2019-01-01', 50, 6.0), credit(2, 'movie', 'Prisoners', '2013-09-19', 3000, 7.9),
+          credit(10, 'movie', 'A documentary', '2020-01-01', 50, 7.0, { character: 'Himself' })],
+        crew: [directed(1, 'Arrival', '2016-11-10'), directed(2, 'Prisoners', '2013-09-19'),
+          directed(3, 'Dune: Part Three', '2999-12-18'), { ...directed(4, 'A production', '2020-01-01'), job: 'Producer' },
+          { ...directed(1, 'Arrival', '2016-11-10'), job: 'Screenplay' }],
+      },
+    },
+  });
+  const p = await (await person(137427)).json();
+  assert.match(p.line, /^Director · Born 1967 \(\d+\) · Quebec, Canada$/);
+  assert.deepEqual(Object.fromEntries(p.rows.map(([t, cards]) => [t, cards.map((c) => c[2])])),
+    { Coming: ['Dune: Part Three'], 'Best rated': ['Arrival', 'Prisoners', 'A role'], Films: ['A role', 'Arrival', 'Prisoners'] });
+});
+
+test('film page: the director first in the photos row, as "Director"', async () => {
+  tmdbAnswers({
+    'movie/7': { title: 'Dune: Part Two', credits: {
+      cast: [{ id: 100, name: 'Timothée Chalamet', character: 'Paul', profile_path: '/t.jpg' }],
+      crew: [{ id: 137427, name: 'Denis Villeneuve', job: 'Director', profile_path: '/d.jpg' },
+        { id: 5, name: 'A producer', job: 'Producer', profile_path: '/p.jpg' }] } },
+    'movie/8': { title: 'Gran Torino', credits: {
+      cast: [{ id: 190, name: 'Clint Eastwood', character: 'Walt', profile_path: '/c.jpg' }],
+      crew: [{ id: 190, name: 'Clint Eastwood', job: 'Director', profile_path: '/c.jpg' }] } },
+  });
+  const film = await (await card('movie/7')).json();
+  assert.deepEqual(film.cast, [['Denis Villeneuve', 'Director', '/d.jpg', 137427], ['Timothée Chalamet', 'Paul', '/t.jpg', 100]]);
+  assert.deepEqual((await (await card('movie/8')).json()).cast, [['Clint Eastwood', 'Director', '/c.jpg', 190]], 'once');
 });
 
 test('actor page: died; no series, no row; TMDB\'s 404 → 404', async () => {
@@ -546,6 +583,8 @@ function d1() {
   db.exec(readFileSync(new URL('./foryou.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./marks.sql', import.meta.url), 'utf8'));
   db.exec(readFileSync(new URL('./segments.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('./follows.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('./news.sql', import.meta.url), 'utf8'));
   const stmt = (sql, args = []) => ({
     bind: (...a) => stmt(sql, a),
     all: async () => ({ results: db.prepare(sql).all(...args) }),
@@ -916,6 +955,8 @@ test('mine: a new episode out with RU/UA audio goes first in Continue browsing, 
   assert.deepEqual(first.rows[0][1].map((c) => c[2]), ["Foundation", "Widow's Bay", 'Euphoria', 'Peaky Blinders',
     'Dark Matter'], 'Severance: watched to its last aired');
   assert.deepEqual(first.new, { tv_93740: 'S3 E5' }, 'Dark Matter S2 E1: no Russian or Ukrainian yet');
+  assert.deepEqual(first.news.map(([t, c, head, line]) => [typeof t, c[2], head, line]),
+    [['number', 'Foundation', 'Foundation · S3 E5', 'Out in Russian or Ukrainian']], 'What\'s new: when it came out');
   assert.deepEqual(first.left, { tv_93740: '1 ep', tv_196322: '1 ep', tv_60574: '9 ep', tv_85552: '1 ep',
     tv_270476: '9 ep' }, 'aired after the furthest watched (Peaky Blinders: S1 E4-6 and season 2); Severance: none');
   assert.deepEqual(first.next, { tv_93740: 'S3 E5 · up next', tv_270476: 'S1 E2 · up next', tv_85552: 'S3 E8 · up next',
@@ -1176,7 +1217,7 @@ test('mine: no CUB sign-in, or an account not allowed → 401; CUB down → 502;
   assert.equal((await getMine(e)).status, 502);
   cub({ 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]) });
   assert.deepEqual(await (await getMine(e)).json(), { rows: [], marks: {}, grades: {}, new: {}, mylist: [], left: {}, percent: {},
-    seen: [], next: {}, coming: [] });
+    seen: [], next: {}, coming: [], follows: [], news: [] });
 });
 
 test('mine/history: a film played on the stick goes to the front of Lampa\'s history as Lampa\'s card; again: moved', async () => {
@@ -1327,6 +1368,66 @@ test('mine/<mark>: kept in D1 per account and profile (CUB\'s marks need Premium
   assert.equal((await post('scheduled/tv/1399', { 'X-Cub-Token': 'other', 'X-Cub-Profile': '8' })).status, 204);
   assert.deepEqual((await titles()).marks, { tv_1399: 'viewed' }, 'another profile\'s marks are its own');
   assert.equal((await post('look/tv/1399')).status, 400, 'not one of the app\'s marks');
+});
+
+test('follow: a person\'s coming films (directed, or a lead) reach Coming up; each film once; unfollow; asked again daily', async () => {
+  const e = mineEnv();
+  const later = (days) => new Date(Date.now() + days * 86400e3).toISOString().slice(0, 10);
+  const directed = (id, name, date) => ({ ...credit(id, 'movie', name, date, 0, 0), job: 'Director', character: undefined });
+  const villeneuve = { id: 137427, name: 'Denis Villeneuve', known_for_department: 'Directing', combined_credits: { crew: [
+    directed(3, 'Dune: Part Three', later(10)), { ...directed(4, 'A far one', later(200)), poster_path: null }, directed(5, 'Undated', ''),
+    directed(1, 'Arrival', '2016-11-10')] } };
+  const zendaya = { id: 505710, name: 'Zendaya', known_for_department: 'Acting', combined_credits: { cast: [
+    credit(3, 'movie', 'Dune: Part Three', later(10), 0, 0, { order: 1 }), credit(6, 'movie', 'A small part', later(5), 0, 0, { order: 12 }),
+    credit(7, 'movie', 'The Drama', later(20), 0, 0, { order: 0 })] } };
+  const answers = { 'users/get': { user: { id: 42 } }, 'bookmarks/dump': cubDump([]), 'person/137427': villeneuve, 'person/505710': zendaya };
+  const post = (path, h = lampa) => worker.fetch(new Request('https://w/mine/' + path, { method: 'POST', headers: h }), e);
+  cub(answers);
+  assert.equal((await post('follow/137427')).status, 204);
+  cub(answers);
+  assert.equal((await post('follow/505710')).status, 204);
+  cub(answers);
+  const body = await (await getMine(e)).json();
+  assert.deepEqual(body.follows.sort(), [137427, 505710]);
+  assert.deepEqual(body.coming.map(([date, c, what, state]) => [date ? 'dated' : 'later', c[2], what.split(' · ')[0], state]), [
+    ['dated', 'Dune: Part Three', "Denis Villeneuve's new film", 'film'], // once, by whoever comes first
+    ['dated', 'The Drama', 'With Zendaya', 'film'],
+    ['later', 'A far one', "Denis Villeneuve's new film", 'film'], // past four weeks: Later
+  ]);
+  assert.equal(body.coming[2][1][4], '', 'no poster yet: "", never null (the stick would ask for "null")');
+  cub(answers);
+  assert.equal((await post('unfollow/505710')).status, 204);
+  cub(answers);
+  assert.deepEqual((await (await getMine(e)).json()).follows, [137427]);
+  cub({ 'users/get': { user: { id: 9 } } });
+  assert.equal((await post('follow/1')).status, 401);
+  // the hourly cron (not New in 4K's run): asked again once a day; a film not seen before is news (What's new)
+  e.DB.raw.prepare("INSERT INTO uhd (type, id, t, pos) VALUES ('movie', 1, 1, 0)").run();
+  e.DB.raw.prepare('UPDATE follows SET t = 0').run();
+  const hour = new Date(); hour.setUTCHours(10);
+  cub({ 'person/137427': { ...villeneuve, combined_credits: { crew: [directed(3, 'Dune: Part Three', later(10)),
+    directed(8, 'Announced', '2027-12-17')] } } });
+  await worker.scheduled({ cron: '23 * * * *', scheduledTime: hour.getTime() }, { ...e, GRADES: undefined });
+  const row = e.DB.raw.prepare('SELECT coming, known, t FROM follows').get();
+  assert.deepEqual(JSON.parse(row.coming).map(([, c]) => c[2]), ['Dune: Part Three', 'Announced']);
+  assert.deepEqual(JSON.parse(row.known).sort(), [3, 4, 8], 'the films seen, before and now');
+  assert.ok(row.t > 0);
+  cub(answers);
+  const { news } = await (await getMine(e)).json();
+  assert.deepEqual(news.map(([t, c, head, line]) => [typeof t, c[2], head, line]),
+    [['number', 'Announced', 'Denis Villeneuve', 'New film: Announced · 17 Dec 2027']], 'Dune: Part Three was known');
+  cub({});
+  await worker.scheduled({ cron: '23 * * * *', scheduledTime: hour.getTime() }, { ...e, GRADES: undefined });
+  assert.ok(!asked.some((u) => u.includes('person/')), 'not again the same day');
+  // TMDB failing for one: stamped all the same, so it doesn't hold the others back every hour
+  e.DB.raw.prepare('UPDATE follows SET t = 0').run();
+  cub({});
+  await worker.scheduled({ cron: '23 * * * *', scheduledTime: hour.getTime() }, { ...e, GRADES: undefined });
+  assert.ok(e.DB.raw.prepare('SELECT t FROM follows').get().t > 0);
+  assert.equal(e.DB.raw.prepare('SELECT count(*) n FROM news').get().n, 1, 'once');
+  cub(answers);
+  assert.equal((await post('follow/137427')).status, 204, 'followed again (another device)');
+  assert.deepEqual(JSON.parse(e.DB.raw.prepare('SELECT known FROM follows').get().known).sort(), [3, 4, 8], 'what was seen kept');
 });
 
 // Lampa's Utils.hash, as the app's Timeline.key: Java's String.hashCode, positive.
