@@ -198,6 +198,17 @@ test('film page answers TMDB\'s 404 as 404 and other TMDB failures as 502', asyn
   assert.equal((await card('tv/1')).status, 502);
 });
 
+test('season: its episodes\' numbers, names, runtimes, overviews and stills', async () => {
+  tmdbAnswers({ 'tv/1396/season/2': { episodes: [
+    { episode_number: 8, name: 'Better Call Saul', runtime: 47, overview: 'Badger is arrested.', still_path: '/s8.jpg' },
+    { episode_number: 9, name: 'Episode 9', runtime: null, overview: '', still_path: null }] } });
+  const res = await worker.fetch(new Request('https://w/season/1396/2'), env);
+  assert.deepEqual((await res.json()).episodes, [[8, 'Better Call Saul', 47, 'Badger is arrested.', '/s8.jpg'],
+    [9, 'Episode 9', 0, '', '']]);
+  assert.equal(res.headers.get('Cache-Control'), 'max-age=86400');
+  assert.equal((await worker.fetch(new Request('https://w/season/1/1'), env)).status, 502, 'TMDB down');
+});
+
 const person = async (id) => worker.fetch(new Request('https://w/person/' + id), env);
 const credit = (id, type, name, date, votes, average, more = {}) => ({
   id, media_type: type, [type === 'tv' ? 'name' : 'title']: name, [type === 'tv' ? 'first_air_date' : 'release_date']: date,
@@ -840,11 +851,15 @@ test('mine: a new episode out with RU/UA audio goes first in Continue browsing, 
       bm(1, 'history', 'tv', 1, { id: 93740, name: 'Основание' }), bm(2, 'history', 'tv', 2, { id: 196322, name: 'Тёмная материя' }),
       bm(3, 'history', 'tv', 3, { id: 60574, name: 'Острые козырьки' }), bm(4, 'history', 'tv', 4, { id: 95396, name: 'Разделение' }),
       bm(5, 'history', 'tv', 5, { id: 85552, name: 'Эйфория' }), bm(6, 'history', 'tv', 6, { id: 270476, name: 'Залив вдов' }),
+      bm(7, 'book', 'tv', 7, { id: 7, name: 'Пилот' }),
     ]),
     'tv/93740': show(93740, 'Foundation', 'tt0804484', [[1, 10, '2021-09-23'], [2, 10, '2023-07-14'], [3, 10, day(60)]],
       [3, 5], day(7)),
     'tv/196322': show(196322, 'Dark Matter', 'tt12688584', [[1, 9, '2024-05-08'], [2, 10, day(2)]], [2, 1], day(2)),
-    'tv/60574': show(60574, 'Peaky Blinders', 'tt2442560', [[1, 6, '2013-09-12'], [2, 6, '2014-10-02']], [2, 6], '2014-11-06'),
+    'tv/60574': show(60574, 'Peaky Blinders', 'tt2442560', [[1, 6, '2013-09-12'], [2, 6, '2014-10-02'], [3, 6, day(-10)]],
+      [2, 6], '2014-11-06'), // behind, and season 3 starts in 10 days
+    'tv/7': { id: 7, name: 'Pilot', original_name: 'Pilot', poster_path: '/7.jpg', external_ids: { imdb_id: 'tt7' },
+      seasons: [{ season_number: 1, episode_count: 8, air_date: day(-20) }] }, // My list, not out yet
     'tv/95396': { ...show(95396, 'Severance', 'tt11280740', [[1, 9, day(40)]], [1, 1], day(40)),
       next_episode_to_air: { air_date: day(-5) } },
     'tv/85552': show(85552, 'Euphoria', 'tt8772296', [[3, 8, day(200)]], [3, 8], day(150)),
@@ -861,10 +876,13 @@ test('mine: a new episode out with RU/UA audio goes first in Continue browsing, 
     tv_270476: '9 ep' }, 'aired after the furthest watched (Peaky Blinders: S1 E4-6 and season 2); Severance: none');
   assert.deepEqual(first.next, { tv_93740: 'S3 E5 · up next', tv_270476: 'S1 E2 · up next', tv_85552: 'S3 E8 · up next',
     tv_60574: 'S1 E4 · up next', tv_196322: 'S2 E1 · up next' }, 'Continue browsing\'s tiles: the episode after the furthest watched');
-  assert.deepEqual(first.coming.map(([date, c, what, state]) => [date, c[2], what, state]), [
-    [day(0), 'Foundation', 'S3 E5 · out with RU/UA audio · next after your E4', 'out'],
-    [day(0), 'Dark Matter', 'Season 2 starts · out in English · you finished season 1', 'waiting'],
-    [day(-5), 'Severance', 'S1 E2 · next after your E1', 'airs']], 'caught up on Severance: its next air date');
+  assert.deepEqual(first.coming.map(([date, c, what, state, episode]) => [date, c[2], what, state, episode]), [
+    [day(0), 'Foundation', 'S3 E5 · out with RU/UA audio · next after your E4', 'out', [3, 5]],
+    [day(0), 'Dark Matter', 'Season 2 starts · out in English · you finished season 1', 'waiting', [2, 1]],
+    [day(-5), 'Severance', 'S1 E2 · next after your E1', 'airs', [1, 2]],
+    [day(-10), 'Peaky Blinders', "Season 3 starts · you're on S1 E4", 'airs', [3, 1]],
+    [day(-20), 'Pilot', 'Season 1 starts', 'airs', [1, 1]]],
+  'caught up on Severance: its next air date; a season starting, wherever you are in it (Pilot: in My list)');
   assert.deepEqual(asked.filter((u) => u.includes('torrentio')).sort(),
     ['torrentio.strem.fun/stream/series/tt0804484:3:5.json', 'torrentio.strem.fun/stream/series/tt12688584:2:1.json']);
   cub(answers);
