@@ -152,7 +152,7 @@ def recap(o):
     text = (out.get('result') or '').strip()
     log('recap model:', ', '.join(out.get('modelUsage') or {}) or '?')
     # 120-180 words: 300+ characters (Chinese, Japanese, Korean: ~200); shorter or NONE: Claude can't (kept for good)
-    short = 120 if re.search(r'[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]', text) else 300
+    short = 120 if lang.split()[0] in ('Chinese', 'Japanese', 'Korean', 'Cantonese') else 300
     if out.get('is_error') or text == 'NONE' or len(text) < short:
         log('recap:', text[:200] or r.stderr[:200])
         return None
