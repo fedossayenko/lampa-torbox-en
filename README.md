@@ -6,7 +6,7 @@ Plugin URL for Lampa:
 
     https://fedossayenko.github.io/lampa-torbox-en/torbox-lampa-plugin-en.js
 
-Proxy: TorBox blocks browser (CORS) calls, so the plugin goes through `proxy/`, upstream's locked-down Cloudflare Worker deployed as `https://torbox-proxy.sayenkofedor.workers.dev` (`cd proxy && npx wrangler@4 deploy`). It forwards the API key only to api.torbox.app.
+Proxy: TorBox blocks browser (CORS) calls, so the plugin goes through a Cloudflare Worker deployed as `https://torbox-proxy.sayenkofedor.workers.dev`. Its source is [`worker/` in lampa-native](https://github.com/fedossayenko/lampa-native/tree/main/worker), deployed with `PASS_THROUGH = "1"` (the plugin's `?url=` pass-through and `/mdblist` scores; off by default). The pass-through takes https addresses of api.torbox.app and the Jacred parsers jr.maxvol.pro and jacred.xyz only, sends the API key only to api.torbox.app, and forwards no cookies.
 
 Auto-sync: `.github/workflows/sync.yml` runs daily, pulls upstream, re-applies `torrentio-patch.js` via `patch.py`, commits if changed. If upstream moves the anchor line the run fails (GitHub emails you) and the published file stays on the last good version.
 
@@ -32,4 +32,4 @@ Grades are kept in Lampa's storage (`torbox_grades`) and synced through the work
 
 ## Resume points shared with lampa-native
 
-Lampa's resume points ("timeline": where each film or episode was stopped) are shared with [lampa-native](https://github.com/fedossayenko/lampa-native), the stick's native app, through the worker (`GET`/`POST /timeline`, Cloudflare D1, table in `proxy/timeline.sql`). At start and whenever Lampa comes back on screen, the plugin puts the server's newer points into Lampa's timeline and sends Lampa's newer ones up (the first time, all of them); Lampa's own changes go up as they happen. Per point the newer one wins. Same CUB sign-in check as the grades; lampa-native uses its own token. Lampa's own CUB timeline sync needs CUB Premium; this doesn't. One timeline per household (not per CUB profile).
+Lampa's resume points ("timeline": where each film or episode was stopped) are shared with [lampa-native](https://github.com/fedossayenko/lampa-native), the stick's native app, through the worker (`GET`/`POST /timeline`, Cloudflare D1, table in [`worker/timeline.sql`](https://github.com/fedossayenko/lampa-native/blob/main/worker/timeline.sql)). At start and whenever Lampa comes back on screen, the plugin puts the server's newer points into Lampa's timeline and sends Lampa's newer ones up (the first time, all of them); Lampa's own changes go up as they happen. Per point the newer one wins. Same CUB sign-in check as the grades; lampa-native uses its own token. Lampa's own CUB timeline sync needs CUB Premium; this doesn't. One timeline per household (not per CUB profile).

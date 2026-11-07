@@ -35,7 +35,7 @@
   }
 
   // Grades are shared by every Lampa signed in to the same CUB account and profile (the TV, Lampa in a browser),
-  // through our worker (proxy/, KV; it checks the CUB sign-in with CUB and doesn't keep it). Synced at start and
+  // through our worker (lampa-native's worker/, KV; it checks the CUB sign-in with CUB and doesn't keep it). Synced at start and
   // 5 s after the last grade; per film the newer grade wins.
   const SYNC = 'https://torbox-proxy.sayenkofedor.workers.dev/grades';
   let syncTimer = null;

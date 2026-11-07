@@ -49,7 +49,7 @@ EDITS = [
     # Saved filters missing a newer key (e.g. season) must fall back to defaults instead of crashing the menu.
     ("        return JSON.parse(Store.get('torbox_filters_v2', JSON.stringify(defaultFilters)));",
      "        return { ...defaultFilters, ...JSON.parse(Store.get('torbox_filters_v2', JSON.stringify(defaultFilters))) };"),
-    # Own Cloudflare Worker (proxy/ in this repo) instead of upstream's, which saw every API key.
+    # Own Cloudflare Worker (lampa-native's worker/) instead of upstream's, which saw every API key.
     ("  const DEFAULT_PROXY_URL = 'https://my-torbox-proxy.slonce70.workers.dev';",
      "  const DEFAULT_PROXY_URL = 'https://torbox-proxy.sayenkofedor.workers.dev';"),
     # A degraded TorBox answers in 15-45 s (Oct 2026); at 20 s every pick timed out.

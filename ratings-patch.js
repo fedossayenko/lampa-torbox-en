@@ -1,7 +1,7 @@
 
 // -en fork: film scores on the card. RT critics, Metacritic and Letterboxd next to IMDb/KP, every score coloured,
 // plus a combined verdict first in the row, TMDB per-season scores under it for series, and the verdict on posters.
-// Scores come from MDBList through our worker (proxy/, the key stays there); cached 7 days per film.
+// Scores come from MDBList through our worker (lampa-native's worker/, the key stays there); cached 7 days per film.
 (function () {
   if (window.torbox_en_ratings) return;
   const API = 'https://torbox-proxy.sayenkofedor.workers.dev/mdblist/';
